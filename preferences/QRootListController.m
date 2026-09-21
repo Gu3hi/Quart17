@@ -53,7 +53,7 @@
             @"启用通知样式": @"Enable notification style", @"深色卡片": @"Dark cards",
             @"圆形应用图标": @"Round app icons", @"显示通知内容": @"Show notification text",
             @"锁屏播放器": @"Lock Screen Player", @"Quart 风格播放器": @"Quart style player",
-            @"圆角封面": @"Rounded artwork", @"显示播放进度": @"Show playback progress",
+            @"圆形封面": @"Circular artwork", @"显示播放进度": @"Show playback progress",
             @"用背景显示进度": @"Use background progress", @"隐藏音频输出入口": @"Hide audio output control",
             @"跟随封面颜色": @"Artwork Colors", @"播放器背景": @"Player background",
             @"歌曲标题": @"Song title", @"作者文字": @"Artist text",
@@ -65,7 +65,7 @@
         NSDictionary *englishFooters = @{
             @"关闭总开关会停用通知与锁屏播放器样式，并收起以下设置。": @"Turn off to disable both styles and collapse the options below.",
             @"只控制通知卡片。锁屏播放器由下方的开关单独控制。": @"Only affects notification cards. The player has its own switch below.",
-            @"替换锁屏播放器外观。点右上角“刷新”可更新已显示的内容，不会中断音频。": @"Replace the Lock Screen player. Refresh updates visible content without interrupting audio.",
+            @"圆形封面开启播放进度时，外圈显示当前进度。点右上角“刷新”可更新样式，不会中断音频。": @"With circular artwork and progress enabled, the outer ring shows playback position. Refresh updates the style without interrupting audio.",
             @"为每首歌从封面提取颜色。关闭某项后，该项使用固定配色。": @"Pick colors from each song's artwork. Disabled items use fixed colors.",
             @"致敬 @LaughingQuoll\n永远怀念最好的开发者。": @"In tribute to @LaughingQuoll\nForever remembering the best developer."
         };

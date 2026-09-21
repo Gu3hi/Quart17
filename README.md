@@ -4,7 +4,7 @@ Quart inspired Lock Screen player and notification styling for iOS 17. RootHide 
 
 ## Features
 
-- Capsule Lock Screen player with artwork, scrolling title and artist, playback controls, and seekable progress.
+- Capsule Lock Screen player with circular artwork, a clockwise progress ring, scrolling title and artist, playback controls, and seekable progress.
 - Artwork colors for the player background, text, and progress.
 - Dark notification cards and round application icons.
 - Chinese and English settings, with a master switch and live style refresh that keeps audio playing.

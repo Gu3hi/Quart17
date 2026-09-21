@@ -126,6 +126,7 @@ static BOOL QLoadMediaRemote(void) {
 typedef NS_ENUM(NSInteger, QOutlineKind) {
     QOutlineKindLeft,
     QOutlineKindRight,
+    QOutlineKindSquare,
     QOutlineKindCircle
 };
 
@@ -174,6 +175,8 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
     UIBezierPath *path = [UIBezierPath bezierPath];
     if (self.outlineKind == QOutlineKindCircle) {
         [path appendPath:[UIBezierPath bezierPathWithOvalInRect:CGRectMake(5, 5, 14, 14)]];
+    } else if (self.outlineKind == QOutlineKindSquare) {
+        [path appendPath:[UIBezierPath bezierPathWithRect:CGRectMake(5, 5, 14, 14)]];
     } else {
         BOOL left = self.outlineKind == QOutlineKindLeft;
         [path moveToPoint:CGPointMake(left ? 18 : 6, 5)];
@@ -189,6 +192,8 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 
 @interface QPlayerView ()
 @property (nonatomic, strong) UIImageView *artwork;
+@property (nonatomic, strong) CAShapeLayer *artworkProgressTrack;
+@property (nonatomic, strong) CAShapeLayer *artworkProgressRing;
 @property (nonatomic, strong) QMarqueeLabel *titleLabel;
 @property (nonatomic, strong) QMarqueeLabel *artistLabel;
 @property (nonatomic, strong) UILabel *elapsedLabel;
@@ -256,6 +261,16 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
         [_artwork addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(openPlayingApp:)]];
         [self addSubview:_artwork];
 
+        _artworkProgressTrack = [CAShapeLayer layer];
+        _artworkProgressRing = [CAShapeLayer layer];
+        for (CAShapeLayer *ring in @[_artworkProgressTrack, _artworkProgressRing]) {
+            ring.fillColor = UIColor.clearColor.CGColor;
+            ring.lineWidth = 2.5;
+            ring.lineCap = kCALineCapRound;
+            ring.transform = CATransform3DMakeRotation(-M_PI_2, 0, 0, 1);
+            [self.layer addSublayer:ring];
+        }
+
         _titleLabel = [QMarqueeLabel new];
         _titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
         _titleLabel.textColor = [UIColor colorWithWhite:0.15 alpha:1];
@@ -318,7 +333,7 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 - (void)updateControlImages {
     self.previousButton.outlineKind = QOutlineKindLeft;
     self.nextButton.outlineKind = QOutlineKindRight;
-    self.playButton.outlineKind = self.playing ? QOutlineKindCircle : QOutlineKindRight;
+    self.playButton.outlineKind = self.playing ? QOutlineKindSquare : QOutlineKindCircle;
     [self.previousButton useThemeImage:[UIImage imageNamed:@"Quart17Previous"]];
     [self.nextButton useThemeImage:[UIImage imageNamed:@"Quart17Next"]];
     [self.playButton useThemeImage:[UIImage imageNamed:self.playing ? @"Quart17Pause" : @"Quart17Play"]];
@@ -347,12 +362,15 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
     self.layer.cornerRadius = radius;
     self.layer.cornerCurve = kCACornerCurveCircular;
     self.artwork.layer.cornerRadius = [settings[@"roundArtwork"] boolValue] ? 30 : 0;
-    self.artwork.layer.cornerCurve = kCACornerCurveContinuous;
+    self.artwork.layer.cornerCurve = [settings[@"roundArtwork"] boolValue] ? kCACornerCurveCircular : kCACornerCurveContinuous;
     BOOL showProgress = [settings[@"showProgress"] boolValue];
     BOOL backgroundStyle = [settings[@"backgroundProgress"] boolValue];
     self.progress.hidden = !showProgress || backgroundStyle;
     self.backgroundProgress.hidden = !showProgress || !backgroundStyle;
     self.backgroundSeekArea.hidden = !showProgress || !backgroundStyle;
+    BOOL showArtworkRing = showProgress && [settings[@"roundArtwork"] boolValue];
+    self.artworkProgressTrack.hidden = !showArtworkRing;
+    self.artworkProgressRing.hidden = !showArtworkRing;
     self.elapsedLabel.hidden = !showProgress;
     self.remainingLabel.hidden = !showProgress;
     self.routeView.hidden = [settings[@"hideRoute"] boolValue];
@@ -401,6 +419,9 @@ static UIColor *QAccentFromImage(UIImage *image) {
     self.artistLabel.textColor = [self.settings[@"artistFromArtwork"] boolValue] ? [accent colorWithAlphaComponent:0.78] : [UIColor colorWithWhite:0.36 alpha:1];
     self.progress.minimumTrackTintColor = [self.settings[@"progressFromArtwork"] boolValue] ? accent : [UIColor colorWithRed:0.18 green:0.45 blue:0.76 alpha:1];
     self.backgroundProgress.backgroundColor = [[self.settings[@"progressFromArtwork"] boolValue] ? accent : [UIColor colorWithRed:0.18 green:0.45 blue:0.76 alpha:1] colorWithAlphaComponent:0.18];
+    UIColor *ringColor = [self.settings[@"progressFromArtwork"] boolValue] ? accent : [UIColor colorWithRed:0.18 green:0.45 blue:0.76 alpha:1];
+    self.artworkProgressTrack.strokeColor = [ringColor colorWithAlphaComponent:0.25].CGColor;
+    self.artworkProgressRing.strokeColor = ringColor.CGColor;
     self.previousButton.tintColor = accent;
     self.playButton.tintColor = accent;
     self.nextButton.tintColor = accent;
@@ -670,6 +691,10 @@ static NSString *QTextInView(UIView *root) {
     CGFloat width = round(self.bounds.size.width * fraction * scale) / scale;
     self.backgroundProgress.frame = CGRectMake(0, 0, width, self.bounds.size.height);
     self.backgroundProgress.layer.cornerRadius = MIN(self.bounds.size.height / 2, width / 2);
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.artworkProgressRing.strokeEnd = fraction;
+    [CATransaction commit];
 }
 
 - (void)layoutSubviews {
@@ -689,6 +714,16 @@ static NSString *QTextInView(UIView *root) {
     CGFloat artY = (h - art) / 2 + verticalShift;
     self.artwork.frame = CGRectMake(pad, artY, art, art);
     self.artwork.layer.cornerRadius = [self.settings[@"roundArtwork"] boolValue] ? art / 2 : 7;
+    self.artwork.layer.cornerCurve = [self.settings[@"roundArtwork"] boolValue] ? kCACornerCurveCircular : kCACornerCurveContinuous;
+    CGRect ringFrame = CGRectInset(self.artwork.frame, -3, -3);
+    UIBezierPath *ringPath = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(CGRectMake(0, 0, ringFrame.size.width, ringFrame.size.height), 1.25, 1.25)];
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.artworkProgressTrack.frame = ringFrame;
+    self.artworkProgressRing.frame = ringFrame;
+    self.artworkProgressTrack.path = ringPath.CGPath;
+    self.artworkProgressRing.path = ringPath.CGPath;
+    [CATransaction commit];
     CGFloat textX = pad + art + 12;
     CGFloat controlsWidth = 102;
     CGFloat textW = MAX(50, w - textX - controlsWidth - 12);
