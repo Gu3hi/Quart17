@@ -43,7 +43,8 @@
             @"masterEnabled": @"power", @"enabled": @"bell.badge", @"darkCards": @"moon.fill",
             @"roundIcons": @"app.fill", @"showContent": @"text.bubble",
             @"playerEnabled": @"play.rectangle.fill", @"roundArtwork": @"circle.grid.2x2.fill",
-            @"showProgress": @"slider.horizontal.3", @"backgroundProgress": @"rectangle.fill",
+            @"showProgress": @"slider.horizontal.3", @"progressStyle": @"circle.dotted.circle",
+            @"hideControls": @"eye.slash",
             @"hideRoute": @"airplay.audio", @"backgroundFromArtwork": @"paintpalette.fill",
             @"titleFromArtwork": @"textformat", @"artistFromArtwork": @"person.fill",
             @"progressFromArtwork": @"line.diagonal"
@@ -54,7 +55,8 @@
             @"圆形应用图标": @"Round app icons", @"显示通知内容": @"Show notification text",
             @"锁屏播放器": @"Lock Screen Player", @"Quart 风格播放器": @"Quart style player",
             @"圆形封面": @"Circular artwork", @"显示播放进度": @"Show playback progress",
-            @"用背景显示进度": @"Use background progress", @"隐藏音频输出入口": @"Hide audio output control",
+            @"进度条样式": @"Progress style", @"隐藏控制按钮": @"Hide playback buttons",
+            @"隐藏音频输出入口": @"Hide audio output control",
             @"跟随封面颜色": @"Artwork Colors", @"播放器背景": @"Player background",
             @"歌曲标题": @"Song title", @"作者文字": @"Artist text",
             @"播放进度": @"Playback progress", @"关于": @"About",
@@ -65,7 +67,7 @@
         NSDictionary *englishFooters = @{
             @"关闭总开关会停用通知与锁屏播放器样式，并收起以下设置。": @"Turn off to disable both styles and collapse the options below.",
             @"只控制通知卡片。锁屏播放器由下方的开关单独控制。": @"Only affects notification cards. The player has its own switch below.",
-            @"圆形封面开启播放进度时，外圈显示当前进度。点右上角“刷新”可更新样式，不会中断音频。": @"With circular artwork and progress enabled, the outer ring shows playback position. Refresh updates the style without interrupting audio.",
+            @"三种进度样式只能选择一种；封面圆环模式会自动使用圆形封面。点右上角“刷新”可更新样式，不会中断音频。": @"Choose one of three progress styles. The artwork ring makes the cover circular. Refresh updates the style without interrupting audio.",
             @"为每首歌从封面提取颜色。关闭某项后，该项使用固定配色。": @"Pick colors from each song's artwork. Disabled items use fixed colors.",
             @"致敬 @LaughingQuoll\n永远怀念最好的开发者。": @"In tribute to @LaughingQuoll\nForever remembering the best developer."
         };
@@ -75,6 +77,9 @@
             UIImage *icon = symbol ? [UIImage systemImageNamed:symbol] : nil;
             if (icon) [specifier setProperty:icon forKey:@"iconImage"];
             if (!self.isChinese) {
+                if ([key isEqualToString:@"progressStyle"]) {
+                    [specifier setProperty:@[@"Player background", @"Bottom bar", @"Artwork ring"] forKey:@"validTitles"];
+                }
                 NSString *translatedName = english[specifier.name];
                 if (translatedName) specifier.name = translatedName;
                 NSString *footer = specifier.properties[@"footerText"];
@@ -104,6 +109,9 @@
 
 - (id)readPreferenceValue:(PSSpecifier *)specifier {
     NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.gushi.quart17.plist"];
+    if ([specifier.properties[@"key"] isEqualToString:@"progressStyle"] && !settings[@"progressStyle"]) {
+        return settings[@"backgroundProgress"] ? ([settings[@"backgroundProgress"] boolValue] ? @0 : @1) : @0;
+    }
     return settings[specifier.properties[@"key"]] ?: specifier.properties[@"default"];
 }
 

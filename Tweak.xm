@@ -22,9 +22,13 @@ static void QLoadSettings(void) {
                     @"roundIcons": @YES, @"showContent": @YES, @"radius": @24,
                     @"playerEnabled": @YES, @"roundArtwork": @YES,
                     @"showProgress": @YES, @"backgroundProgress": @YES, @"hideRoute": @YES,
+                    @"hideControls": @NO,
                     @"titleFromArtwork": @YES, @"artistFromArtwork": @YES,
                     @"progressFromArtwork": @YES, @"backgroundFromArtwork": @YES } mutableCopy];
     if ([saved isKindOfClass:NSDictionary.class]) [qSettings addEntriesFromDictionary:saved];
+    if (!qSettings[@"progressStyle"]) {
+        qSettings[@"progressStyle"] = [qSettings[@"backgroundProgress"] boolValue] ? @0 : @1;
+    }
 }
 
 static void QChanged(CFNotificationCenterRef center, void *observer, CFStringRef name,

@@ -123,6 +123,26 @@ static BOOL QLoadMediaRemote(void) {
 
 @end
 
+static UIImage *QButtonArtwork(NSString *name) {
+    static NSString *buttonsDirectory;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Dl_info info;
+        if (dladdr((const void *)&QButtonArtwork, &info) && info.dli_fname) {
+            NSString *dylibPath = [NSString stringWithUTF8String:info.dli_fname];
+            NSRange library = [dylibPath rangeOfString:@"/Library/MobileSubstrate/DynamicLibraries/" options:NSBackwardsSearch];
+            if (library.location != NSNotFound) {
+                NSString *prefix = library.location == 0 ? @"/" : [dylibPath substringToIndex:library.location];
+                buttonsDirectory = [prefix stringByAppendingPathComponent:@"Library/Application Support/Quart17/Buttons"];
+            }
+        }
+        if (!buttonsDirectory) buttonsDirectory = @"/Library/Application Support/Quart17/Buttons";
+    });
+    NSString *path = [buttonsDirectory stringByAppendingPathComponent:[name stringByAppendingPathExtension:@"png"]];
+    UIImage *image = [UIImage imageWithContentsOfFile:path];
+    return image ? [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] : nil;
+}
+
 typedef NS_ENUM(NSInteger, QOutlineKind) {
     QOutlineKindLeft,
     QOutlineKindRight,
@@ -132,6 +152,7 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 
 @interface QOutlineButton : UIButton
 @property (nonatomic) QOutlineKind outlineKind;
+@property (nonatomic) BOOL visuallyHidden;
 @property (nonatomic, strong) CAShapeLayer *outlineLayer;
 - (void)useThemeImage:(UIImage *)image;
 @end
@@ -151,9 +172,9 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 }
 
 - (void)useThemeImage:(UIImage *)image {
-    [self setImage:image ? [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] : nil
+    [self setImage:!self.visuallyHidden && image ? [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] : nil
           forState:UIControlStateNormal];
-    self.outlineLayer.hidden = image != nil;
+    self.outlineLayer.hidden = self.visuallyHidden || image != nil;
     [self setNeedsLayout];
 }
 
@@ -206,8 +227,12 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 @property (nonatomic, strong) QOutlineButton *nextButton;
 @property (nonatomic, strong) AVRoutePickerView *routeView;
 @property (nonatomic, strong) NSTimer *timer;
+@property (nonatomic, strong) CADisplayLink *progressDisplayLink;
 @property (nonatomic) NSTimeInterval duration;
 @property (nonatomic) NSTimeInterval elapsed;
+@property (nonatomic) NSTimeInterval progressAnchorElapsed;
+@property (nonatomic) CFTimeInterval progressAnchorTime;
+@property (nonatomic) CFTimeInterval lastMediaRemoteProgressTime;
 @property (nonatomic) BOOL playing;
 @property (nonatomic) BOOL scrubbing;
 @property (nonatomic, copy) NSDictionary *settings;
@@ -331,25 +356,43 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 }
 
 - (void)updateControlImages {
+    BOOL hideControls = [self.settings[@"hideControls"] boolValue];
+    self.previousButton.visuallyHidden = hideControls;
+    self.playButton.visuallyHidden = hideControls;
+    self.nextButton.visuallyHidden = hideControls;
     self.previousButton.outlineKind = QOutlineKindLeft;
     self.nextButton.outlineKind = QOutlineKindRight;
     self.playButton.outlineKind = self.playing ? QOutlineKindSquare : QOutlineKindCircle;
-    [self.previousButton useThemeImage:[UIImage imageNamed:@"Quart17Previous"]];
-    [self.nextButton useThemeImage:[UIImage imageNamed:@"Quart17Next"]];
-    [self.playButton useThemeImage:[UIImage imageNamed:self.playing ? @"Quart17Pause" : @"Quart17Play"]];
+    [self.previousButton useThemeImage:QButtonArtwork(@"previous")];
+    [self.nextButton useThemeImage:QButtonArtwork(@"next")];
+    [self.playButton useThemeImage:QButtonArtwork(self.playing ? @"pause" : @"play")];
 }
 
 - (void)didMoveToWindow {
     [super didMoveToWindow];
     [self.timer invalidate];
     self.timer = nil;
+    [self.progressDisplayLink invalidate];
+    self.progressDisplayLink = nil;
     [NSNotificationCenter.defaultCenter removeObserver:self name:@"kMRMediaRemoteNowPlayingInfoDidChangeNotification" object:nil];
     if (self.window) {
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(nowPlayingChanged:)
                                                 name:@"kMRMediaRemoteNowPlayingInfoDidChangeNotification" object:nil];
         [self refresh];
         self.timer = [NSTimer scheduledTimerWithTimeInterval:1 target:self selector:@selector(refresh) userInfo:nil repeats:YES];
+        self.progressDisplayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(updateVisualProgress)];
+        self.progressDisplayLink.preferredFramesPerSecond = 30;
+        [self.progressDisplayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
     }
+}
+
+- (void)updateVisualProgress {
+    if (self.scrubbing || self.duration <= 0 || ![self.settings[@"showProgress"] boolValue]) return;
+    CFTimeInterval now = CACurrentMediaTime();
+    NSTimeInterval elapsed = self.progressAnchorElapsed + (self.playing ? MAX(0, now - self.progressAnchorTime) : 0);
+    self.elapsed = MIN(self.duration, MAX(0, elapsed));
+    self.progress.value = self.elapsed / self.duration;
+    [self updateProgressFill];
 }
 
 - (void)nowPlayingChanged:(NSNotification *)notification {
@@ -358,17 +401,19 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 
 - (void)applySettings:(NSDictionary *)settings {
     self.settings = settings;
+    NSInteger progressStyle = [settings[@"progressStyle"] integerValue];
+    if (progressStyle < 0 || progressStyle > 2) progressStyle = 0;
+    BOOL circularArtwork = [settings[@"roundArtwork"] boolValue] || progressStyle == 2;
     CGFloat radius = self.bounds.size.height / 2;
     self.layer.cornerRadius = radius;
     self.layer.cornerCurve = kCACornerCurveCircular;
-    self.artwork.layer.cornerRadius = [settings[@"roundArtwork"] boolValue] ? 30 : 0;
-    self.artwork.layer.cornerCurve = [settings[@"roundArtwork"] boolValue] ? kCACornerCurveCircular : kCACornerCurveContinuous;
+    self.artwork.layer.cornerRadius = circularArtwork ? 30 : 0;
+    self.artwork.layer.cornerCurve = circularArtwork ? kCACornerCurveCircular : kCACornerCurveContinuous;
     BOOL showProgress = [settings[@"showProgress"] boolValue];
-    BOOL backgroundStyle = [settings[@"backgroundProgress"] boolValue];
-    self.progress.hidden = !showProgress || backgroundStyle;
-    self.backgroundProgress.hidden = !showProgress || !backgroundStyle;
-    self.backgroundSeekArea.hidden = !showProgress || !backgroundStyle;
-    BOOL showArtworkRing = showProgress && [settings[@"roundArtwork"] boolValue];
+    self.progress.hidden = !showProgress || progressStyle != 1;
+    self.backgroundProgress.hidden = !showProgress || progressStyle != 0;
+    self.backgroundSeekArea.hidden = !showProgress || progressStyle != 0;
+    BOOL showArtworkRing = showProgress && progressStyle == 2;
     self.artworkProgressTrack.hidden = !showArtworkRing;
     self.artworkProgressRing.hidden = !showArtworkRing;
     self.elapsedLabel.hidden = !showProgress;
@@ -466,6 +511,7 @@ static NSTimeInterval QParseTime(NSString *text) {
                 strongSelf.artworkData = nil;
                 strongSelf.duration = 0;
                 strongSelf.progress.value = 0;
+                strongSelf.progressAnchorElapsed = 0;
                 [strongSelf updateProgressFill];
                 [strongSelf updateAccent];
             }
@@ -481,6 +527,8 @@ static NSTimeInterval QParseTime(NSString *text) {
             strongSelf.duration = 0;
             strongSelf.elapsed = 0;
             strongSelf.progress.value = 0;
+            strongSelf.progressAnchorElapsed = 0;
+            strongSelf.progressAnchorTime = CACurrentMediaTime();
             strongSelf.seekHoldUntil = 0;
             [strongSelf updateProgressFill];
         }
@@ -505,11 +553,19 @@ static NSTimeInterval QParseTime(NSString *text) {
         NSTimeInterval age = [NSDate date].timeIntervalSince1970 - timestamp;
         if (timestamp > 0 && rate > 0 && age >= 0 && age < 10) elapsed += age * rate;
         if (strongSelf.duration > 0 && isfinite(elapsed)) {
-            strongSelf.elapsed = MIN(MAX(0, elapsed), strongSelf.duration);
-            if (fabs(strongSelf.elapsed - strongSelf.seekTarget) < 2) strongSelf.seekHoldUntil = 0;
-            if (!strongSelf.scrubbing && CFAbsoluteTimeGetCurrent() >= strongSelf.seekHoldUntil)
-                strongSelf.progress.value = strongSelf.elapsed / strongSelf.duration;
-            [strongSelf updateProgressFill];
+            NSTimeInterval reported = MIN(MAX(0, elapsed), strongSelf.duration);
+            strongSelf.lastMediaRemoteProgressTime = CACurrentMediaTime();
+            if (fabs(reported - strongSelf.seekTarget) < 2) strongSelf.seekHoldUntil = 0;
+            if (!strongSelf.scrubbing && CFAbsoluteTimeGetCurrent() >= strongSelf.seekHoldUntil) {
+                CFTimeInterval now = CACurrentMediaTime();
+                NSTimeInterval predicted = strongSelf.progressAnchorElapsed +
+                    (strongSelf.playing ? MAX(0, now - strongSelf.progressAnchorTime) : 0);
+                if (strongSelf.progressAnchorTime == 0 || fabs(reported - predicted) > 1.5 || !strongSelf.playing) {
+                    strongSelf.progressAnchorElapsed = reported;
+                    strongSelf.progressAnchorTime = now;
+                }
+                [strongSelf updateVisualProgress];
+            }
         }
         strongSelf.elapsedLabel.text = QTime(strongSelf.elapsed);
         strongSelf.remainingLabel.text = [@"−" stringByAppendingString:QTime(MAX(0, strongSelf.duration - strongSelf.elapsed))];
@@ -517,6 +573,11 @@ static NSTimeInterval QParseTime(NSString *text) {
     if (QGetPlaying) QGetPlaying(dispatch_get_main_queue(), ^(Boolean isPlaying) {
         QPlayerView *strongSelf = weakSelf;
         if (!strongSelf) return;
+        if (strongSelf.playing != isPlaying) {
+            CFTimeInterval now = CACurrentMediaTime();
+            strongSelf.progressAnchorElapsed = strongSelf.elapsed;
+            strongSelf.progressAnchorTime = now;
+        }
         strongSelf.playing = isPlaying;
         if ([strongSelf.titleLabel.text isEqualToString:@"未在播放"] ||
             [strongSelf.titleLabel.text isEqualToString:@"正在播放"] ||
@@ -618,11 +679,19 @@ static NSString *QTextInView(UIView *root) {
                 remaining = QParseTime(timeLabels.lastObject.text);
             }
         }
-        if (elapsed >= 0 && remaining >= 0 && elapsed + remaining > 0) {
+        if (elapsed >= 0 && remaining >= 0 && elapsed + remaining > 0 &&
+            CACurrentMediaTime() - self.lastMediaRemoteProgressTime > 3) {
             self.duration = elapsed + remaining;
-            self.elapsed = elapsed;
-            if (!self.scrubbing && CFAbsoluteTimeGetCurrent() >= self.seekHoldUntil)
-                self.progress.value = elapsed / self.duration;
+            if (!self.scrubbing && CFAbsoluteTimeGetCurrent() >= self.seekHoldUntil) {
+                CFTimeInterval now = CACurrentMediaTime();
+                NSTimeInterval predicted = self.progressAnchorElapsed +
+                    (self.playing ? MAX(0, now - self.progressAnchorTime) : 0);
+                if (self.progressAnchorTime == 0 || fabs(elapsed - predicted) > 1.5 || !self.playing) {
+                    self.progressAnchorElapsed = elapsed;
+                    self.progressAnchorTime = now;
+                }
+                [self updateVisualProgress];
+            }
             [self updateProgressFill];
         } else if (self.nativeSlider && !self.scrubbing && self.duration <= 0) {
             CGFloat span = self.nativeSlider.maximumValue - self.nativeSlider.minimumValue;
@@ -681,6 +750,8 @@ static NSString *QTextInView(UIView *root) {
         [native sendActionsForControlEvents:UIControlEventTouchUpInside];
     }
     self.elapsed = self.duration * fraction;
+    self.progressAnchorElapsed = self.elapsed;
+    self.progressAnchorTime = CACurrentMediaTime();
     [self updateProgressFill];
     [self refresh];
 }
@@ -708,13 +779,14 @@ static NSString *QTextInView(UIView *root) {
     self.backgroundSeekArea.frame = self.bounds;
     CGFloat pad = 12;
     CGFloat art = MIN(60, MAX(46, h - 23));
-    BOOL bottomProgress = [self.settings[@"showProgress"] boolValue] &&
-                          ![self.settings[@"backgroundProgress"] boolValue];
+    NSInteger progressStyle = [self.settings[@"progressStyle"] integerValue];
+    BOOL bottomProgress = [self.settings[@"showProgress"] boolValue] && progressStyle == 1;
+    BOOL circularArtwork = [self.settings[@"roundArtwork"] boolValue] || progressStyle == 2;
     CGFloat verticalShift = bottomProgress ? -3 : 0;
     CGFloat artY = (h - art) / 2 + verticalShift;
     self.artwork.frame = CGRectMake(pad, artY, art, art);
-    self.artwork.layer.cornerRadius = [self.settings[@"roundArtwork"] boolValue] ? art / 2 : 7;
-    self.artwork.layer.cornerCurve = [self.settings[@"roundArtwork"] boolValue] ? kCACornerCurveCircular : kCACornerCurveContinuous;
+    self.artwork.layer.cornerRadius = circularArtwork ? art / 2 : 7;
+    self.artwork.layer.cornerCurve = circularArtwork ? kCACornerCurveCircular : kCACornerCurveContinuous;
     CGRect ringFrame = CGRectInset(self.artwork.frame, -3, -3);
     UIBezierPath *ringPath = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(CGRectMake(0, 0, ringFrame.size.width, ringFrame.size.height), 1.25, 1.25)];
     [CATransaction begin];
