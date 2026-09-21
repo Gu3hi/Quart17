@@ -20,7 +20,7 @@ static void QLoadSettings(void) {
     NSDictionary *saved = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.gushi.quart17.plist"];
     qSettings = [@{ @"masterEnabled": @YES, @"enabled": @YES, @"darkCards": @NO,
                     @"roundIcons": @YES, @"radius": @24,
-                    @"playerEnabled": @YES, @"roundArtwork": @YES,
+                    @"playerEnabled": @YES,
                     @"showProgress": @YES, @"backgroundProgress": @YES, @"hideRoute": @YES,
                     @"hideControls": @NO,
                     @"titleFromArtwork": @YES, @"artistFromArtwork": @YES,
@@ -28,6 +28,9 @@ static void QLoadSettings(void) {
     if ([saved isKindOfClass:NSDictionary.class]) [qSettings addEntriesFromDictionary:saved];
     if (!qSettings[@"progressStyle"]) {
         qSettings[@"progressStyle"] = [qSettings[@"backgroundProgress"] boolValue] ? @0 : @1;
+    }
+    if (!qSettings[@"playerCornerRoundness"]) {
+        qSettings[@"playerCornerRoundness"] = saved[@"roundArtwork"] && ![saved[@"roundArtwork"] boolValue] ? @0 : @1;
     }
 }
 

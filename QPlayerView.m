@@ -2,6 +2,7 @@
 #import <AVKit/AVKit.h>
 #import <dlfcn.h>
 #import <objc/message.h>
+#import <roothide.h>
 
 typedef void (^QInfoCompletion)(CFDictionaryRef);
 typedef void (^QPlayingCompletion)(Boolean);
@@ -124,23 +125,15 @@ static BOOL QLoadMediaRemote(void) {
 @end
 
 static UIImage *QButtonArtwork(NSString *name) {
-    static NSString *buttonsDirectory;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        Dl_info info;
-        if (dladdr((const void *)&QButtonArtwork, &info) && info.dli_fname) {
-            NSString *dylibPath = [NSString stringWithUTF8String:info.dli_fname];
-            NSRange library = [dylibPath rangeOfString:@"/Library/MobileSubstrate/DynamicLibraries/" options:NSBackwardsSearch];
-            if (library.location != NSNotFound) {
-                NSString *prefix = library.location == 0 ? @"/" : [dylibPath substringToIndex:library.location];
-                buttonsDirectory = [prefix stringByAppendingPathComponent:@"Library/Application Support/Quart17/Buttons"];
-            }
-        }
-        if (!buttonsDirectory) buttonsDirectory = @"/Library/Application Support/Quart17/Buttons";
-    });
-    NSString *path = [buttonsDirectory stringByAppendingPathComponent:[name stringByAppendingPathExtension:@"png"]];
+    NSString *directory = jbroot(@"/Library/Application Support/Quart17/Buttons");
+    NSString *path = [directory stringByAppendingPathComponent:[name stringByAppendingPathExtension:@"png"]];
     UIImage *image = [UIImage imageWithContentsOfFile:path];
-    return image ? [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] : nil;
+    if (!image) return nil;
+    UIGraphicsBeginImageContextWithOptions(CGSizeMake(24, 24), NO, 0);
+    [image drawInRect:CGRectMake(0, 0, 24, 24)];
+    UIImage *scaled = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return [scaled imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
 }
 
 typedef NS_ENUM(NSInteger, QOutlineKind) {
@@ -293,7 +286,6 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
             ring.fillColor = UIColor.clearColor.CGColor;
             ring.lineWidth = 2.5;
             ring.lineCap = kCALineCapRound;
-            ring.transform = CATransform3DMakeRotation(-M_PI_2, 0, 0, 1);
             [self.layer addSublayer:ring];
         }
         _artworkSeekArea = [UIView new];
@@ -410,12 +402,13 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
     self.settings = settings;
     NSInteger progressStyle = [settings[@"progressStyle"] integerValue];
     if (progressStyle < 0 || progressStyle > 2) progressStyle = 0;
-    BOOL circularArtwork = [settings[@"roundArtwork"] boolValue] || progressStyle == 2;
-    CGFloat radius = self.bounds.size.height / 2;
+    CGFloat roundness = settings[@"playerCornerRoundness"] ? [settings[@"playerCornerRoundness"] doubleValue] : 1;
+    roundness = isfinite(roundness) ? MIN(1, MAX(0, roundness)) : 1;
+    CGFloat radius = self.bounds.size.height * roundness / 2;
     self.layer.cornerRadius = radius;
     self.layer.cornerCurve = kCACornerCurveCircular;
-    self.artwork.layer.cornerRadius = circularArtwork ? 30 : 0;
-    self.artwork.layer.cornerCurve = circularArtwork ? kCACornerCurveCircular : kCACornerCurveContinuous;
+    self.artwork.layer.cornerRadius = 30 * roundness;
+    self.artwork.layer.cornerCurve = kCACornerCurveCircular;
     BOOL showProgress = [settings[@"showProgress"] boolValue];
     self.progress.hidden = !showProgress || progressStyle != 1;
     self.backgroundProgress.hidden = !showProgress || progressStyle != 0;
@@ -485,6 +478,14 @@ static NSString *QTime(NSTimeInterval value) {
     return [NSString stringWithFormat:@"%ld:%02ld", (long)(seconds / 60), (long)(seconds % 60)];
 }
 
+static NSString *QPlayingPlaceholder(void) {
+    return [[NSLocale.preferredLanguages.firstObject lowercaseString] hasPrefix:@"zh"] ? @"正在播放" : @"Now Playing";
+}
+
+static BOOL QIsPlaybackPlaceholder(NSString *text) {
+    return [@[@"正在播放", @"未在播放", @"Now Playing", @"Not Playing"] containsObject:text ?: @""];
+}
+
 static NSTimeInterval QParseTime(NSString *text) {
     if (![text isKindOfClass:NSString.class]) return -1;
     NSString *clean = [[text stringByReplacingOccurrencesOfString:@"−" withString:@""]
@@ -513,7 +514,7 @@ static NSTimeInterval QParseTime(NSString *text) {
         if (![title isKindOfClass:NSString.class] || title.length == 0) {
             if (!strongSelf.hasValidNativeMetadata &&
                 CFAbsoluteTimeGetCurrent() - strongSelf.lastMetadataTime > 5) {
-                strongSelf.titleLabel.text = strongSelf.playing ? @"正在播放" : @"";
+                strongSelf.titleLabel.text = strongSelf.playing ? QPlayingPlaceholder() : @"";
                 strongSelf.artistLabel.text = @"";
                 strongSelf.artwork.image = nil;
                 strongSelf.artworkData = nil;
@@ -587,10 +588,8 @@ static NSTimeInterval QParseTime(NSString *text) {
             strongSelf.progressAnchorTime = now;
         }
         strongSelf.playing = isPlaying;
-        if ([strongSelf.titleLabel.text isEqualToString:@"未在播放"] ||
-            [strongSelf.titleLabel.text isEqualToString:@"正在播放"] ||
-            strongSelf.titleLabel.text.length == 0) {
-            strongSelf.titleLabel.text = isPlaying ? @"正在播放" : @"";
+        if (QIsPlaybackPlaceholder(strongSelf.titleLabel.text) || strongSelf.titleLabel.text.length == 0) {
+            strongSelf.titleLabel.text = isPlaying ? QPlayingPlaceholder() : @"";
         }
         [strongSelf updateControlImages];
     });
@@ -803,7 +802,9 @@ static CGFloat QArtworkSeekFraction(UIView *area, CGPoint point) {
     CGFloat scale = UIScreen.mainScreen.scale;
     CGFloat width = round(self.bounds.size.width * fraction * scale) / scale;
     self.backgroundProgress.frame = CGRectMake(0, 0, width, self.bounds.size.height);
-    self.backgroundProgress.layer.cornerRadius = MIN(self.bounds.size.height / 2, width / 2);
+    CGFloat roundness = self.settings[@"playerCornerRoundness"] ? [self.settings[@"playerCornerRoundness"] doubleValue] : 1;
+    roundness = isfinite(roundness) ? MIN(1, MAX(0, roundness)) : 1;
+    self.backgroundProgress.layer.cornerRadius = MIN(self.bounds.size.height * roundness / 2, width / 2);
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     self.artworkProgressRing.strokeEnd = fraction;
@@ -813,7 +814,9 @@ static CGFloat QArtworkSeekFraction(UIView *area, CGPoint point) {
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGFloat w = self.bounds.size.width, h = self.bounds.size.height;
-    self.layer.cornerRadius = h / 2;
+    CGFloat roundness = self.settings[@"playerCornerRoundness"] ? [self.settings[@"playerCornerRoundness"] doubleValue] : 1;
+    roundness = isfinite(roundness) ? MIN(1, MAX(0, roundness)) : 1;
+    self.layer.cornerRadius = h * roundness / 2;
     self.layer.cornerCurve = kCACornerCurveCircular;
     self.backgroundProgress.layer.cornerCurve = kCACornerCurveCircular;
     self.backgroundProgress.layer.allowsEdgeAntialiasing = YES;
@@ -823,22 +826,36 @@ static CGFloat QArtworkSeekFraction(UIView *area, CGPoint point) {
     CGFloat art = MIN(60, MAX(46, h - 23));
     NSInteger progressStyle = [self.settings[@"progressStyle"] integerValue];
     BOOL bottomProgress = [self.settings[@"showProgress"] boolValue] && progressStyle == 1;
-    BOOL circularArtwork = [self.settings[@"roundArtwork"] boolValue] || progressStyle == 2;
     CGFloat verticalShift = bottomProgress ? -3 : 0;
     CGFloat artY = (h - art) / 2 + verticalShift;
     self.artwork.frame = CGRectMake(pad, artY, art, art);
-    self.artwork.layer.cornerRadius = circularArtwork ? art / 2 : 7;
-    self.artwork.layer.cornerCurve = circularArtwork ? kCACornerCurveCircular : kCACornerCurveContinuous;
+    self.artwork.layer.cornerRadius = art * roundness / 2;
+    self.artwork.layer.cornerCurve = kCACornerCurveCircular;
     CGRect ringFrame = CGRectInset(self.artwork.frame, -3, -3);
     self.artworkSeekArea.frame = CGRectInset(self.artwork.frame, -6, -6);
-    UIBezierPath *ringPath = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(CGRectMake(0, 0, ringFrame.size.width, ringFrame.size.height), 1.25, 1.25)];
+    CGRect ringRect = CGRectInset(CGRectMake(0, 0, ringFrame.size.width, ringFrame.size.height), 1.25, 1.25);
+    CGFloat left = CGRectGetMinX(ringRect), right = CGRectGetMaxX(ringRect);
+    CGFloat top = CGRectGetMinY(ringRect), bottom = CGRectGetMaxY(ringRect);
+    CGFloat ringRadius = MIN(ringRect.size.width, ringRect.size.height) * roundness / 2;
+    CGMutablePathRef ringPath = CGPathCreateMutable();
+    CGPathMoveToPoint(ringPath, NULL, CGRectGetMidX(ringRect), top);
+    CGPathAddLineToPoint(ringPath, NULL, right - ringRadius, top);
+    if (ringRadius > 0) CGPathAddArcToPoint(ringPath, NULL, right, top, right, top + ringRadius, ringRadius);
+    CGPathAddLineToPoint(ringPath, NULL, right, bottom - ringRadius);
+    if (ringRadius > 0) CGPathAddArcToPoint(ringPath, NULL, right, bottom, right - ringRadius, bottom, ringRadius);
+    CGPathAddLineToPoint(ringPath, NULL, left + ringRadius, bottom);
+    if (ringRadius > 0) CGPathAddArcToPoint(ringPath, NULL, left, bottom, left, bottom - ringRadius, ringRadius);
+    CGPathAddLineToPoint(ringPath, NULL, left, top + ringRadius);
+    if (ringRadius > 0) CGPathAddArcToPoint(ringPath, NULL, left, top, left + ringRadius, top, ringRadius);
+    CGPathCloseSubpath(ringPath);
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     self.artworkProgressTrack.frame = ringFrame;
     self.artworkProgressRing.frame = ringFrame;
-    self.artworkProgressTrack.path = ringPath.CGPath;
-    self.artworkProgressRing.path = ringPath.CGPath;
+    self.artworkProgressTrack.path = ringPath;
+    self.artworkProgressRing.path = ringPath;
     [CATransaction commit];
+    CGPathRelease(ringPath);
     CGFloat textX = pad + art + 12;
     CGFloat controlsWidth = 102;
     CGFloat textW = MAX(50, w - textX - controlsWidth - 12);

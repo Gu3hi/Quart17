@@ -2,6 +2,7 @@
 #import <Preferences/PSSpecifier.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <UIKit/UIKit.h>
+#import <roothide.h>
 
 @interface QRootListController : PSListController
 @property (nonatomic, strong) NSArray<PSSpecifier *> *allQuartSpecifiers;
@@ -42,7 +43,7 @@
         NSDictionary *symbols = @{
             @"masterEnabled": @"power", @"enabled": @"bell.badge", @"darkCards": @"moon.fill",
             @"roundIcons": @"app.fill",
-            @"playerEnabled": @"play.rectangle.fill", @"roundArtwork": @"circle.grid.2x2.fill",
+            @"playerEnabled": @"play.rectangle.fill",
             @"showProgress": @"slider.horizontal.3", @"progressStyle": @"circle.dotted.circle",
             @"hideControls": @"eye.slash",
             @"hideRoute": @"airplay.audio", @"backgroundFromArtwork": @"paintpalette.fill",
@@ -54,8 +55,9 @@
             @"启用通知样式": @"Enable notification style", @"深色卡片": @"Dark cards",
             @"圆形应用图标": @"Round app icons",
             @"锁屏播放器": @"Lock Screen Player", @"Quart 风格播放器": @"Quart style player",
-            @"圆形封面": @"Circular artwork", @"显示播放进度": @"Show playback progress",
+            @"统一圆角": @"Corner roundness", @"显示播放进度": @"Show playback progress",
             @"进度条样式": @"Progress style", @"隐藏控制按钮": @"Hide playback buttons",
+            @"查看按钮图标目录": @"Button icon folder",
             @"隐藏音频输出入口": @"Hide audio output control",
             @"跟随封面颜色": @"Artwork Colors", @"播放器背景": @"Player background",
             @"歌曲标题": @"Song title", @"作者文字": @"Artist text",
@@ -67,7 +69,8 @@
         NSDictionary *englishFooters = @{
             @"关闭总开关会停用通知与锁屏播放器样式，并收起以下设置。": @"Turn off to disable both styles and collapse the options below.",
             @"只控制通知卡片。锁屏播放器由下方的开关单独控制。": @"Only affects notification cards. The player has its own switch below.",
-            @"三种进度样式只能选择一种；封面圆环模式会自动使用圆形封面。点右上角“刷新”可更新样式，不会中断音频。": @"Choose one of three progress styles. The artwork ring makes the cover circular. Refresh updates the style without interrupting audio.",
+            @"三种进度样式只能选择一种。点右上角“刷新”可更新样式，不会中断音频。": @"Choose one of three progress styles. Refresh updates the style without interrupting audio.",
+            @"同步调节播放器、背景进度填充、封面和封面进度环的圆角。": @"Adjust player, background progress fill, artwork, and artwork progress ring corners together.",
             @"为每首歌从封面提取颜色。关闭某项后，该项使用固定配色。": @"Pick colors from each song's artwork. Disabled items use fixed colors.",
             @"致敬 @LaughingQuoll\n永远怀念最好的开发者。": @"In tribute to @LaughingQuoll\nForever remembering the best developer."
         };
@@ -107,10 +110,27 @@
     [self openURLString:@"https://github.com/Gu3hi/Quart17"];
 }
 
+- (void)showButtonIconPath:(id)sender {
+    NSString *path = jbroot(@"/Library/Application Support/Quart17/Buttons");
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:
+        [self localized:@"按钮图标目录" english:@"Button icon folder"]
+        message:path preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:[self localized:@"复制路径" english:@"Copy path"]
+        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+            UIPasteboard.generalPasteboard.string = path;
+        }]];
+    [alert addAction:[UIAlertAction actionWithTitle:[self localized:@"关闭" english:@"Close"]
+        style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
 - (id)readPreferenceValue:(PSSpecifier *)specifier {
     NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.gushi.quart17.plist"];
     if ([specifier.properties[@"key"] isEqualToString:@"progressStyle"] && !settings[@"progressStyle"]) {
         return settings[@"backgroundProgress"] ? ([settings[@"backgroundProgress"] boolValue] ? @0 : @1) : @0;
+    }
+    if ([specifier.properties[@"key"] isEqualToString:@"playerCornerRoundness"] && !settings[@"playerCornerRoundness"]) {
+        return settings[@"roundArtwork"] && ![settings[@"roundArtwork"] boolValue] ? @0 : @1;
     }
     return settings[specifier.properties[@"key"]] ?: specifier.properties[@"default"];
 }
