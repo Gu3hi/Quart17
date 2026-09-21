@@ -1,1 +1,1 @@
-{ Filter = { Bundles = ( "com.apple.springboard", "com.apple.MediaRemoteUI" ); }; }
+{ Filter = { Bundles = ( "com.apple.springboard" ); }; }

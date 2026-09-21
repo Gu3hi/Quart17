@@ -108,6 +108,12 @@ static UIView *QFind(UIView *root, NSString *className) {
     return nil;
 }
 
+static BOOL QHasAncestor(UIView *view, NSString *className) {
+    for (UIView *ancestor = view.superview; ancestor; ancestor = ancestor.superview)
+        if ([NSStringFromClass(ancestor.class) isEqualToString:className]) return YES;
+    return NO;
+}
+
 static void QRememberStyle(UIView *view) {
     if (objc_getAssociatedObject(view, QOriginalStyleKey)) return;
     NSDictionary *state = @{
@@ -192,106 +198,9 @@ static void QStyle(UIView *root) {
     }
 }
 
-// On iOS 16/17 the lock-screen player lives in MediaRemoteUI. Its context is 2;
-// Control Center can use the same class, so never style by class name alone.
-@interface MRUNowPlayingViewController : UIViewController
-- (long long)context;
-@end
-
 @interface PLPlatterView : UIView
 @end
-@interface CSMediaControlsView : UIView
-@end
-@interface _UISceneLayerHostContainerView : UIView
-@end
-@interface _UIContextLayerHostView : UIView
-@end
-
-static BOOL QIsLockScreenPlayer(MRUNowPlayingViewController *controller) {
-    if ([controller respondsToSelector:@selector(context)] && controller.context == 2) return YES;
-    for (UIViewController *parent = controller.parentViewController; parent; parent = parent.parentViewController) {
-        if ([NSStringFromClass(parent.class) isEqualToString:@"MRUCoverSheetViewController"]) return YES;
-    }
-    return NO;
-}
-
-static void *QPlayerBackdropKey = &QPlayerBackdropKey;
-static void *QCustomPlayerKey = &QCustomPlayerKey;
 static void *QSpringBoardPlayerKey = &QSpringBoardPlayerKey;
-
-static void QClearMediaMaterials(UIView *host) {
-    if (!host) return;
-    host.backgroundColor = UIColor.clearColor;
-    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithArray:host.subviews];
-    while (queue.count) {
-        UIView *view = queue.lastObject;
-        [queue removeLastObject];
-        NSString *name = NSStringFromClass(view.class);
-        if ([name containsString:@"MaterialView"] || [name isEqualToString:@"UIVisualEffectView"]) {
-            view.alpha = 0;
-        } else {
-            [queue addObjectsFromArray:view.subviews];
-        }
-    }
-}
-
-static void QStylePlayer(UIView *player) {
-    if (!player) return;
-    QPlayerView *custom = objc_getAssociatedObject(player, QCustomPlayerKey);
-    if (![qSettings[@"masterEnabled"] boolValue] || ![qSettings[@"playerEnabled"] boolValue]) {
-        custom.hidden = YES;
-        return;
-    }
-    player.backgroundColor = UIColor.clearColor;
-    player.layer.cornerRadius = 0;
-    player.layer.borderWidth = 0;
-    player.clipsToBounds = NO;
-
-    UIView *backdrop = objc_getAssociatedObject(player, QPlayerBackdropKey);
-    if (!backdrop) {
-        backdrop = [[UIView alloc] initWithFrame:player.bounds];
-        backdrop.userInteractionEnabled = NO;
-        backdrop.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [player insertSubview:backdrop atIndex:0];
-        objc_setAssociatedObject(player, QPlayerBackdropKey, backdrop, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    backdrop.hidden = YES;
-
-    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:player];
-    while (queue.count) {
-        UIView *view = queue.lastObject;
-        [queue removeLastObject];
-        NSString *name = NSStringFromClass(view.class);
-        if ([name isEqualToString:@"MRUNowPlayingTimeControlsView"]) {
-            view.hidden = ![qSettings[@"showProgress"] boolValue];
-        }
-        if ([name containsString:@"RoutingButton"] || [name isEqualToString:@"MPRouteLabel"]) {
-            view.hidden = [qSettings[@"hideRoute"] boolValue];
-        }
-        if ([qSettings[@"roundArtwork"] boolValue] &&
-            [name containsString:@"Artwork"] && view.bounds.size.width > 25) {
-            CGFloat artworkRadius = MIN(18, MIN(view.bounds.size.width, view.bounds.size.height) * 0.16);
-            view.layer.cornerRadius = artworkRadius;
-            view.layer.cornerCurve = kCACornerCurveContinuous;
-            view.clipsToBounds = YES;
-        }
-        [queue addObjectsFromArray:view.subviews];
-    }
-    if (!custom) {
-        custom = [[QPlayerView alloc] initWithFrame:player.bounds];
-        custom.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [player addSubview:custom];
-        objc_setAssociatedObject(player, QCustomPlayerKey, custom, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [qActivePlayers addObject:custom];
-    }
-    CGFloat capsuleHeight = MIN(88, MAX(70, player.bounds.size.height));
-    custom.frame = CGRectMake(0, (player.bounds.size.height - capsuleHeight) / 2,
-                              player.bounds.size.width, capsuleHeight);
-    [custom applySettings:qSettings];
-    [custom seedFromNativePlayer:player];
-    [player bringSubviewToFront:custom];
-    custom.hidden = NO;
-}
 
 %group QNotifications
 %hook NCNotificationShortLookViewController
@@ -308,23 +217,6 @@ static void QStylePlayer(UIView *player) {
 %end
 %end
 
-%group QPlayer
-%hook MRUNowPlayingViewController
-
-- (void)viewDidLoad {
-    %orig;
-    if (QIsLockScreenPlayer(self)) QStylePlayer(self.view);
-}
-
-- (void)viewDidLayoutSubviews {
-    %orig;
-    if (!QIsLockScreenPlayer(self)) return;
-    QStylePlayer(self.view);
-}
-
-%end
-%end
-
 %group QHostPlatter
 %hook PLPlatterView
 
@@ -333,6 +225,7 @@ static void QStylePlayer(UIView *player) {
     if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"]) return;
     CGSize size = self.bounds.size;
     if (size.width < 340 || size.width > 500 || size.height < 145 || size.height > 195) return;
+    if (!QHasAncestor(self, @"NCNotificationListCell")) return;
     if (!QFind(self, @"CSActivityItemContentView")) return;
     QPlayerView *player = objc_getAssociatedObject(self, QSpringBoardPlayerKey);
     BOOL enabled = [qSettings[@"masterEnabled"] boolValue] && [qSettings[@"playerEnabled"] boolValue];
@@ -374,37 +267,6 @@ static void QStylePlayer(UIView *player) {
 
 %end
 
-%group QHostMedia
-%hook CSMediaControlsView
-
-- (void)layoutSubviews {
-    %orig;
-    if ([qSettings[@"masterEnabled"] boolValue] && [qSettings[@"playerEnabled"] boolValue]) {
-        QClearMediaMaterials(self);
-    }
-}
-
-%end
-%end
-
-%group QSceneHost
-%hook _UISceneLayerHostContainerView
-
-- (void)layoutSubviews {
-    %orig;
-    if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"]) return;
-    CGSize size = self.bounds.size;
-    // iOS 17 CoverSheet's remote Now Playing host; measured on the target
-    // device as 402 x 167 pt. Keep other remote scenes untouched.
-    if (size.width < 340 || size.width > 500 || size.height < 145 || size.height > 195) return;
-    if (![qSettings[@"masterEnabled"] boolValue] || ![qSettings[@"playerEnabled"] boolValue]) return;
-    self.backgroundColor = UIColor.clearColor;
-    self.layer.backgroundColor = UIColor.clearColor.CGColor;
-}
-
-%end
-%end
-
 %ctor {
     @autoreleasepool {
         qActivePlayers = [NSHashTable weakObjectsHashTable];
@@ -420,9 +282,6 @@ static void QStylePlayer(UIView *player) {
                                             NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         }
         if (objc_getClass("NCNotificationShortLookViewController")) %init(QNotifications);
-        if (objc_getClass("MRUNowPlayingViewController")) %init(QPlayer);
         if (objc_getClass("PLPlatterView")) %init(QHostPlatter);
-        if (objc_getClass("CSMediaControlsView")) %init(QHostMedia);
-        if (objc_getClass("_UISceneLayerHostContainerView")) %init(QSceneHost);
     }
 }

@@ -2,7 +2,7 @@ TARGET := iphone:clang:16.5:17.0
 ARCHS := arm64 arm64e
 THEOS_PACKAGE_SCHEME := roothide
 DEB_ARCH := iphoneos-arm64e
-INSTALL_TARGET_PROCESSES := SpringBoard MediaRemoteUI
+INSTALL_TARGET_PROCESSES := SpringBoard
 
 include $(THEOS)/makefiles/common.mk
 
