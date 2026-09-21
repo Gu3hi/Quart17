@@ -1,6 +1,6 @@
 Package: com.gushi.quart17
 Name: Quart17
-Version: 1.0.21
+Version: 1.0.27
 Architecture: iphoneos-arm64e
 Description: Quart-inspired notifications for jailbroken iOS 17
 Maintainer: Put_Story

@@ -124,13 +124,13 @@ static BOOL QLoadMediaRemote(void) {
 
 @end
 
-static UIImage *QButtonArtwork(NSString *name) {
+static UIImage *QButtonArtwork(NSString *name, CGFloat size) {
     NSString *directory = jbroot(@"/Library/Application Support/Quart17/Buttons");
     NSString *path = [directory stringByAppendingPathComponent:[name stringByAppendingPathExtension:@"png"]];
     UIImage *image = [UIImage imageWithContentsOfFile:path];
     if (!image) return nil;
-    UIGraphicsBeginImageContextWithOptions(CGSizeMake(24, 24), NO, 0);
-    [image drawInRect:CGRectMake(0, 0, 24, 24)];
+    UIGraphicsBeginImageContextWithOptions(CGSizeMake(size, size), NO, 0);
+    [image drawInRect:CGRectMake(0, 0, size, size)];
     UIImage *scaled = UIGraphicsGetImageFromCurrentImageContext();
     UIGraphicsEndImageContext();
     return [scaled imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
@@ -146,6 +146,7 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 @interface QOutlineButton : UIButton
 @property (nonatomic) QOutlineKind outlineKind;
 @property (nonatomic) BOOL visuallyHidden;
+@property (nonatomic) CGFloat iconSize;
 @property (nonatomic, strong) CAShapeLayer *outlineLayer;
 - (void)useThemeImage:(UIImage *)image;
 @end
@@ -154,6 +155,7 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
+        _iconSize = 24;
         _outlineLayer = [CAShapeLayer layer];
         _outlineLayer.fillColor = UIColor.clearColor.CGColor;
         _outlineLayer.lineWidth = 1.65;
@@ -183,19 +185,23 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    CGRect icon = CGRectMake((CGRectGetWidth(self.bounds) - 24) / 2,
-                             (CGRectGetHeight(self.bounds) - 24) / 2, 24, 24);
+    CGFloat size = self.iconSize > 0 ? self.iconSize : 24;
+    CGRect icon = CGRectMake((CGRectGetWidth(self.bounds) - size) / 2,
+                             (CGRectGetHeight(self.bounds) - size) / 2, size, size);
     self.outlineLayer.frame = icon;
+    CGFloat c = size / 24.0;
     UIBezierPath *path = [UIBezierPath bezierPath];
     if (self.outlineKind == QOutlineKindCircle) {
-        [path appendPath:[UIBezierPath bezierPathWithOvalInRect:CGRectMake(5, 5, 14, 14)]];
+        CGFloat inset = 5 * c, side = 14 * c;
+        [path appendPath:[UIBezierPath bezierPathWithOvalInRect:CGRectMake(inset, inset, side, side)]];
     } else if (self.outlineKind == QOutlineKindSquare) {
-        [path appendPath:[UIBezierPath bezierPathWithRect:CGRectMake(5, 5, 14, 14)]];
+        CGFloat inset = 5 * c, side = 14 * c;
+        [path appendPath:[UIBezierPath bezierPathWithRect:CGRectMake(inset, inset, side, side)]];
     } else {
         BOOL left = self.outlineKind == QOutlineKindLeft;
-        [path moveToPoint:CGPointMake(left ? 18 : 6, 5)];
-        [path addLineToPoint:CGPointMake(left ? 6 : 18, 12)];
-        [path addLineToPoint:CGPointMake(left ? 18 : 6, 19)];
+        [path moveToPoint:CGPointMake((left ? 18 : 6) * c, 5 * c)];
+        [path addLineToPoint:CGPointMake((left ? 6 : 18) * c, 12 * c)];
+        [path addLineToPoint:CGPointMake((left ? 18 : 6) * c, 19 * c)];
         [path closePath];
     }
     self.outlineLayer.path = path.CGPath;
@@ -240,6 +246,9 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 @property (nonatomic) NSTimeInterval seekHoldUntil;
 @property (nonatomic) NSTimeInterval seekTarget;
 @property (nonatomic) NSTimeInterval lastMetadataTime;
+@property (nonatomic) NSTimeInterval lastReportedDuration;
+@property (nonatomic) CGFloat dragStartProgress;
+@property (nonatomic) CGFloat dragStartX;
 @end
 
 @implementation QPlayerView
@@ -334,6 +343,7 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
         _previousButton = [self button:@"play" action:@selector(previous:)];
         _previousButton.accessibilityIdentifier = @"Quart17.Previous";
         _playButton = [self button:@"square" action:@selector(toggle:)];
+        _playButton.iconSize = 36;
         _playButton.accessibilityIdentifier = @"Quart17.PlayPause";
         _nextButton = [self button:@"play" action:@selector(next:)];
         _nextButton.accessibilityIdentifier = @"Quart17.Next";
@@ -362,9 +372,9 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
     self.previousButton.outlineKind = QOutlineKindLeft;
     self.nextButton.outlineKind = QOutlineKindRight;
     self.playButton.outlineKind = self.playing ? QOutlineKindSquare : QOutlineKindCircle;
-    [self.previousButton useThemeImage:QButtonArtwork(@"previous")];
-    [self.nextButton useThemeImage:QButtonArtwork(@"next")];
-    [self.playButton useThemeImage:QButtonArtwork(self.playing ? @"pause" : @"play")];
+    [self.previousButton useThemeImage:QButtonArtwork(@"previous", 24)];
+    [self.nextButton useThemeImage:QButtonArtwork(@"next", 24)];
+    [self.playButton useThemeImage:QButtonArtwork(self.playing ? @"pause" : @"play", self.playButton.iconSize)];
 }
 
 - (void)didMoveToWindow {
@@ -579,7 +589,22 @@ static NSTimeInterval QParseTime(NSString *text) {
             }
         }
         NSTimeInterval reportedDuration = [info[QKey(QDurationKey, @"kMRMediaRemoteNowPlayingInfoDuration")] doubleValue];
-        if (isfinite(reportedDuration) && reportedDuration > 0) strongSelf.duration = reportedDuration;
+        if (isfinite(reportedDuration) && reportedDuration > 0) {
+            // 切歌检测（不依赖 uniqueIdentifier）：时长突变超过 2s 且 5% 即视为新歌，进度归零
+            if (strongSelf.lastReportedDuration > 0 &&
+                fabs(reportedDuration - strongSelf.lastReportedDuration) > MAX(2, strongSelf.lastReportedDuration * 0.05)) {
+                strongSelf.trackIdentity = @"";
+                strongSelf.duration = 0;
+                strongSelf.elapsed = 0;
+                strongSelf.progress.value = 0;
+                strongSelf.progressAnchorElapsed = 0;
+                strongSelf.progressAnchorTime = CACurrentMediaTime();
+                strongSelf.seekHoldUntil = 0;
+                [strongSelf updateProgressFill];
+            }
+            strongSelf.lastReportedDuration = reportedDuration;
+            strongSelf.duration = reportedDuration;
+        }
         NSTimeInterval elapsed = [info[QKey(QElapsedKey, @"kMRMediaRemoteNowPlayingInfoElapsedTime")] doubleValue];
         NSTimeInterval timestamp = [info[QKey(QTimestampKey, @"kMRMediaRemoteNowPlayingInfoTimestamp")] doubleValue];
         double rate = [info[QKey(QRateKey, @"kMRMediaRemoteNowPlayingInfoPlaybackRate")] doubleValue];
@@ -593,7 +618,14 @@ static NSTimeInterval QParseTime(NSString *text) {
                 CFTimeInterval now = CACurrentMediaTime();
                 NSTimeInterval predicted = strongSelf.progressAnchorElapsed +
                     (strongSelf.playing ? MAX(0, now - strongSelf.progressAnchorTime) : 0);
-                if (strongSelf.progressAnchorTime == 0 || fabs(reported - predicted) > 1.5 || !strongSelf.playing) {
+                // 单向校正：MediaRemote 报告常滞后于本地实时推进，只允许向前修正，
+                // 忽略滞后的旧报告，杜绝进度回退抖动（含 seek 后回退）。
+                // 兜底：进度大幅回退到起始位置（<5s）视为切歌，允许归零重置。
+                // 暂停时仅在差异明显（>2s）时校正，容忍暂停瞬间 rate/timestamp 未更新导致的短暂抖动
+                BOOL rewoundToStart = reported < predicted - 8 && reported < 5;
+                BOOL pausedCorrection = !strongSelf.playing && fabs(reported - predicted) > 2.0;
+                if (strongSelf.progressAnchorTime == 0 || reported > predicted + 0.8 ||
+                    rewoundToStart || pausedCorrection) {
                     strongSelf.progressAnchorElapsed = reported;
                     strongSelf.progressAnchorTime = now;
                 }
@@ -717,7 +749,13 @@ static NSString *QTextInView(UIView *root) {
                 CFTimeInterval now = CACurrentMediaTime();
                 NSTimeInterval predicted = self.progressAnchorElapsed +
                     (self.playing ? MAX(0, now - self.progressAnchorTime) : 0);
-                if (self.progressAnchorTime == 0 || fabs(elapsed - predicted) > 1.5 || !self.playing) {
+                // 与 MediaRemote 路径一致的单向校正，防止原生兜底时间回退进度；
+                // 进度大幅回退到起始位置视为切歌，允许归零重置；
+                // 暂停时仅在差异明显（>2s）时校正，容忍暂停瞬间报告抖动
+                BOOL rewoundToStart = elapsed < predicted - 8 && elapsed < 5;
+                BOOL pausedCorrection = !self.playing && fabs(elapsed - predicted) > 2.0;
+                if (self.progressAnchorTime == 0 || elapsed > predicted + 0.8 ||
+                    rewoundToStart || pausedCorrection) {
                     self.progressAnchorElapsed = elapsed;
                     self.progressAnchorTime = now;
                 }
@@ -760,10 +798,31 @@ static NSString *QTextInView(UIView *root) {
 }
 - (void)seekPanned:(UIPanGestureRecognizer *)gesture {
     UIView *area = gesture.view;
-    CGPoint point = [gesture locationInView:area];
-    self.progress.value = MIN(1, MAX(0, point.x / MAX(1, area.bounds.size.width)));
-    [self updateProgressFill];
-    if (gesture.state == UIGestureRecognizerStateBegan) self.scrubbing = YES;
+    if (area == self.progress) {
+        // 底部进度条：手指位置即进度（保持原交互）
+        CGPoint point = [gesture locationInView:area];
+        self.progress.value = MIN(1, MAX(0, point.x / MAX(1, area.bounds.size.width)));
+        [self updateProgressFill];
+        if (gesture.state == UIGestureRecognizerStateBegan) self.scrubbing = YES;
+        if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+            [self scrubEnded:self.progress];
+        }
+        return;
+    }
+    // 背景进度：相对拖拽，拖动 0.6 倍播放器宽度走完全程
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        self.scrubbing = YES;
+        self.dragStartProgress = MIN(1, MAX(0, self.progress.value));
+        self.dragStartX = [gesture translationInView:self].x;
+        return;
+    }
+    if (gesture.state == UIGestureRecognizerStateChanged) {
+        CGFloat span = MAX(1, self.bounds.size.width * 0.6);
+        self.progress.value = MIN(1, MAX(0, self.dragStartProgress +
+                                         ([gesture translationInView:self].x - self.dragStartX) / span));
+        [self updateProgressFill];
+        return;
+    }
     if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
         [self scrubEnded:self.progress];
     }
@@ -774,9 +833,10 @@ static CGFloat QArtworkSeekFraction(UIView *area, CGPoint point) {
 - (void)artworkSeekTapped:(UITapGestureRecognizer *)gesture {
     UIView *area = gesture.view;
     CGPoint point = [gesture locationInView:area];
-    CGFloat distance = hypot(point.x - CGRectGetMidX(area.bounds),
-                             point.y - CGRectGetMidY(area.bounds));
-    if (distance < MIN(area.bounds.size.width, area.bounds.size.height) / 2 - 12) {
+    CGRect artFrame = [self.artwork convertRect:self.artwork.bounds toView:area];
+    CGPoint center = CGPointMake(CGRectGetMidX(artFrame), CGRectGetMidY(artFrame));
+    CGFloat distance = hypot(point.x - center.x, point.y - center.y);
+    if (distance < MIN(artFrame.size.width, artFrame.size.height) / 2 - 6) {
         [self openPlayingApp:area];
         return;
     }
@@ -789,14 +849,21 @@ static CGFloat QArtworkSeekFraction(UIView *area, CGPoint point) {
         gesture.state != UIGestureRecognizerStateChanged &&
         gesture.state != UIGestureRecognizerStateEnded &&
         gesture.state != UIGestureRecognizerStateCancelled) return;
-    self.scrubbing = YES;
-    UIView *area = gesture.view;
-    CGPoint point = [gesture locationInView:area];
-    self.progress.value = QArtworkSeekFraction(area, point);
-    [self updateProgressFill];
-    if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
-        [self scrubEnded:self.progress];
+    // 封面进度：相对拖拽，拖动 0.6 倍播放器宽度走完全程
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        self.scrubbing = YES;
+        self.dragStartProgress = MIN(1, MAX(0, self.progress.value));
+        self.dragStartX = [gesture translationInView:self].x;
+        return;
     }
+    if (gesture.state == UIGestureRecognizerStateChanged) {
+        CGFloat span = MAX(1, self.bounds.size.width * 0.6);
+        self.progress.value = MIN(1, MAX(0, self.dragStartProgress +
+                                         ([gesture translationInView:self].x - self.dragStartX) / span));
+        [self updateProgressFill];
+        return;
+    }
+    [self scrubEnded:self.progress];
 }
 - (void)scrubEnded:(id)sender {
     self.scrubbing = NO;
@@ -852,7 +919,7 @@ static CGFloat QArtworkSeekFraction(UIView *area, CGPoint point) {
     self.artwork.layer.cornerRadius = art * roundness / 2;
     self.artwork.layer.cornerCurve = kCACornerCurveCircular;
     CGRect ringFrame = CGRectInset(self.artwork.frame, -3, -3);
-    self.artworkSeekArea.frame = CGRectInset(self.artwork.frame, -6, -6);
+    self.artworkSeekArea.frame = self.bounds;
     CGRect ringRect = CGRectInset(CGRectMake(0, 0, ringFrame.size.width, ringFrame.size.height), 1.25, 1.25);
     CGFloat left = CGRectGetMinX(ringRect), right = CGRectGetMaxX(ringRect);
     CGFloat top = CGRectGetMinY(ringRect), bottom = CGRectGetMaxY(ringRect);
@@ -877,7 +944,7 @@ static CGFloat QArtworkSeekFraction(UIView *area, CGPoint point) {
     [CATransaction commit];
     CGPathRelease(ringPath);
     CGFloat textX = pad + art + 12;
-    CGFloat controlsWidth = 102;
+    CGFloat controlsWidth = 110;
     CGFloat textW = MAX(50, w - textX - controlsWidth - 12);
     self.titleLabel.frame = CGRectMake(textX, h / 2 - 20 + verticalShift, textW, 20);
     self.artistLabel.frame = CGRectMake(textX, h / 2 + 3 + verticalShift, textW, 17);
@@ -885,8 +952,8 @@ static CGFloat QArtworkSeekFraction(UIView *area, CGPoint point) {
     CGFloat buttonsX = w - controlsWidth - 8;
     CGFloat buttonsY = (h - 34) / 2 + verticalShift;
     self.previousButton.frame = CGRectMake(buttonsX, buttonsY, 33, 36);
-    self.playButton.frame = CGRectMake(buttonsX + 34, buttonsY, 33, 36);
-    self.nextButton.frame = CGRectMake(buttonsX + 68, buttonsY, 33, 36);
+    self.playButton.frame = CGRectMake(buttonsX + 35, buttonsY - 3, 40, 40);
+    self.nextButton.frame = CGRectMake(buttonsX + 77, buttonsY, 33, 36);
 
     self.progress.frame = CGRectMake(textX, h - 31, MAX(20, w - textX - 17), 30);
     self.elapsedLabel.hidden = YES;

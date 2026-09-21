@@ -112,16 +112,8 @@
 
 - (void)showButtonIconPath:(id)sender {
     NSString *path = jbroot(@"/Library/Application Support/Quart17/Buttons");
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:
-        [self localized:@"按钮图标目录" english:@"Button icon folder"]
-        message:path preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:[self localized:@"复制路径" english:@"Copy path"]
-        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-            UIPasteboard.generalPasteboard.string = path;
-        }]];
-    [alert addAction:[UIAlertAction actionWithTitle:[self localized:@"关闭" english:@"Close"]
-        style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
+    NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"filza://view%@", path]];
+    if (url) [UIApplication.sharedApplication openURL:url options:@{} completionHandler:nil];
 }
 
 - (id)readPreferenceValue:(PSSpecifier *)specifier {
