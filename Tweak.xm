@@ -18,8 +18,8 @@ static void QStyle(UIView *root);
 
 static void QLoadSettings(void) {
     NSDictionary *saved = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.gushi.quart17.plist"];
-    qSettings = [@{ @"masterEnabled": @YES, @"enabled": @YES, @"darkCards": @YES,
-                    @"roundIcons": @YES, @"showContent": @YES, @"radius": @24,
+    qSettings = [@{ @"masterEnabled": @YES, @"enabled": @YES, @"darkCards": @NO,
+                    @"roundIcons": @YES, @"radius": @24,
                     @"playerEnabled": @YES, @"roundArtwork": @YES,
                     @"showProgress": @YES, @"backgroundProgress": @YES, @"hideRoute": @YES,
                     @"hideControls": @NO,
@@ -182,7 +182,6 @@ static void QStyle(UIView *root) {
             UILabel *label = (UILabel *)view;
             QRememberStyle(label);
             if ([qSettings[@"darkCards"] boolValue]) label.textColor = UIColor.whiteColor;
-            if (![qSettings[@"showContent"] boolValue] && label.font.pointSize < 17) label.hidden = YES;
         }
         NSString *name = NSStringFromClass(view.class);
         BOOL iconClass = [name containsString:@"IconView"] || [name isEqualToString:@"NCBadgedIconView"];

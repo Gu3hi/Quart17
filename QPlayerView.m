@@ -215,6 +215,7 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 @property (nonatomic, strong) UIImageView *artwork;
 @property (nonatomic, strong) CAShapeLayer *artworkProgressTrack;
 @property (nonatomic, strong) CAShapeLayer *artworkProgressRing;
+@property (nonatomic, strong) UIView *artworkSeekArea;
 @property (nonatomic, strong) QMarqueeLabel *titleLabel;
 @property (nonatomic, strong) QMarqueeLabel *artistLabel;
 @property (nonatomic, strong) UILabel *elapsedLabel;
@@ -295,6 +296,12 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
             ring.transform = CATransform3DMakeRotation(-M_PI_2, 0, 0, 1);
             [self.layer addSublayer:ring];
         }
+        _artworkSeekArea = [UIView new];
+        _artworkSeekArea.backgroundColor = UIColor.clearColor;
+        _artworkSeekArea.hidden = YES;
+        [_artworkSeekArea addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(artworkSeekTapped:)]];
+        [_artworkSeekArea addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(artworkSeekPanned:)]];
+        [self addSubview:_artworkSeekArea];
 
         _titleLabel = [QMarqueeLabel new];
         _titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
@@ -416,6 +423,7 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
     BOOL showArtworkRing = showProgress && progressStyle == 2;
     self.artworkProgressTrack.hidden = !showArtworkRing;
     self.artworkProgressRing.hidden = !showArtworkRing;
+    self.artworkSeekArea.hidden = !showArtworkRing;
     self.elapsedLabel.hidden = !showProgress;
     self.remainingLabel.hidden = !showProgress;
     self.routeView.hidden = [settings[@"hideRoute"] boolValue];
@@ -737,6 +745,40 @@ static NSString *QTextInView(UIView *root) {
         [self scrubEnded:self.progress];
     }
 }
+static CGFloat QArtworkSeekFraction(UIView *area, CGPoint point) {
+    CGFloat dx = point.x - CGRectGetMidX(area.bounds);
+    CGFloat dy = CGRectGetMidY(area.bounds) - point.y;
+    CGFloat angle = atan2(dx, dy);
+    if (angle < 0) angle += 2 * M_PI;
+    return angle / (2 * M_PI);
+}
+- (void)artworkSeekTapped:(UITapGestureRecognizer *)gesture {
+    UIView *area = gesture.view;
+    CGPoint point = [gesture locationInView:area];
+    CGFloat distance = hypot(point.x - CGRectGetMidX(area.bounds),
+                             point.y - CGRectGetMidY(area.bounds));
+    if (distance < MIN(area.bounds.size.width, area.bounds.size.height) / 2 - 12) {
+        [self openPlayingApp:area];
+        return;
+    }
+    self.progress.value = QArtworkSeekFraction(area, point);
+    [self updateProgressFill];
+    [self scrubEnded:self.progress];
+}
+- (void)artworkSeekPanned:(UIPanGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateBegan &&
+        gesture.state != UIGestureRecognizerStateChanged &&
+        gesture.state != UIGestureRecognizerStateEnded &&
+        gesture.state != UIGestureRecognizerStateCancelled) return;
+    self.scrubbing = YES;
+    UIView *area = gesture.view;
+    CGPoint point = [gesture locationInView:area];
+    self.progress.value = QArtworkSeekFraction(area, point);
+    [self updateProgressFill];
+    if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        [self scrubEnded:self.progress];
+    }
+}
 - (void)scrubEnded:(id)sender {
     self.scrubbing = NO;
     CGFloat fraction = MIN(1, MAX(0, self.progress.value));
@@ -788,6 +830,7 @@ static NSString *QTextInView(UIView *root) {
     self.artwork.layer.cornerRadius = circularArtwork ? art / 2 : 7;
     self.artwork.layer.cornerCurve = circularArtwork ? kCACornerCurveCircular : kCACornerCurveContinuous;
     CGRect ringFrame = CGRectInset(self.artwork.frame, -3, -3);
+    self.artworkSeekArea.frame = CGRectInset(self.artwork.frame, -6, -6);
     UIBezierPath *ringPath = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(CGRectMake(0, 0, ringFrame.size.width, ringFrame.size.height), 1.25, 1.25)];
     [CATransaction begin];
     [CATransaction setDisableActions:YES];

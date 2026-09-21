@@ -41,7 +41,7 @@
         self.allQuartSpecifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
         NSDictionary *symbols = @{
             @"masterEnabled": @"power", @"enabled": @"bell.badge", @"darkCards": @"moon.fill",
-            @"roundIcons": @"app.fill", @"showContent": @"text.bubble",
+            @"roundIcons": @"app.fill",
             @"playerEnabled": @"play.rectangle.fill", @"roundArtwork": @"circle.grid.2x2.fill",
             @"showProgress": @"slider.horizontal.3", @"progressStyle": @"circle.dotted.circle",
             @"hideControls": @"eye.slash",
@@ -52,7 +52,7 @@
         NSDictionary *english = @{
             @"启用插件": @"Enable Quart17", @"通知外观": @"Notifications",
             @"启用通知样式": @"Enable notification style", @"深色卡片": @"Dark cards",
-            @"圆形应用图标": @"Round app icons", @"显示通知内容": @"Show notification text",
+            @"圆形应用图标": @"Round app icons",
             @"锁屏播放器": @"Lock Screen Player", @"Quart 风格播放器": @"Quart style player",
             @"圆形封面": @"Circular artwork", @"显示播放进度": @"Show playback progress",
             @"进度条样式": @"Progress style", @"隐藏控制按钮": @"Hide playback buttons",
