@@ -369,6 +369,7 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 
 - (void)didMoveToWindow {
     [super didMoveToWindow];
+    [self updateAccent];
     [self.timer invalidate];
     self.timer = nil;
     [self.progressDisplayLink invalidate];
@@ -382,6 +383,13 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
         self.progressDisplayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(updateVisualProgress)];
         self.progressDisplayLink.preferredFramesPerSecond = 30;
         [self.progressDisplayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+    }
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    if (previousTraitCollection.userInterfaceStyle != self.traitCollection.userInterfaceStyle) {
+        [self updateAccent];
     }
 }
 
@@ -458,19 +466,35 @@ static UIColor *QAccentFromImage(UIImage *image) {
     self.artworkAccent = accent;
     CGFloat r = 0, g = 0, b = 0, a = 0;
     [accent getRed:&r green:&g blue:&b alpha:&a];
+    BOOL dark = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
+    UIColor *textAccent = dark ? [UIColor colorWithRed:MIN(1, r * 0.52 + 0.48)
+                                                  green:MIN(1, g * 0.52 + 0.48)
+                                                   blue:MIN(1, b * 0.52 + 0.48) alpha:1] : accent;
+    UIColor *baseProgress = [self.settings[@"progressFromArtwork"] boolValue]
+        ? accent : [UIColor colorWithRed:0.18 green:0.45 blue:0.76 alpha:1];
+    CGFloat pr = 0, pg = 0, pb = 0, pa = 0;
+    [baseProgress getRed:&pr green:&pg blue:&pb alpha:&pa];
+    UIColor *progressColor = dark ? [UIColor colorWithRed:pr * 0.55 + 0.45
+                                                    green:pg * 0.55 + 0.45
+                                                     blue:pb * 0.55 + 0.45 alpha:1] : baseProgress;
     self.backgroundColor = [self.settings[@"backgroundFromArtwork"] boolValue]
-        ? [UIColor colorWithRed:r * 0.18 + 0.82 green:g * 0.18 + 0.82 blue:b * 0.18 + 0.82 alpha:0.97]
-        : [UIColor colorWithWhite:0.93 alpha:0.96];
-    self.titleLabel.textColor = [self.settings[@"titleFromArtwork"] boolValue] ? accent : [UIColor colorWithWhite:0.15 alpha:1];
-    self.artistLabel.textColor = [self.settings[@"artistFromArtwork"] boolValue] ? [accent colorWithAlphaComponent:0.78] : [UIColor colorWithWhite:0.36 alpha:1];
-    self.progress.minimumTrackTintColor = [self.settings[@"progressFromArtwork"] boolValue] ? accent : [UIColor colorWithRed:0.18 green:0.45 blue:0.76 alpha:1];
-    self.backgroundProgress.backgroundColor = [[self.settings[@"progressFromArtwork"] boolValue] ? accent : [UIColor colorWithRed:0.18 green:0.45 blue:0.76 alpha:1] colorWithAlphaComponent:0.18];
-    UIColor *ringColor = [self.settings[@"progressFromArtwork"] boolValue] ? accent : [UIColor colorWithRed:0.18 green:0.45 blue:0.76 alpha:1];
+        ? (dark ? [UIColor colorWithRed:r * 0.22 + 0.08 green:g * 0.22 + 0.08 blue:b * 0.22 + 0.08 alpha:0.97]
+                : [UIColor colorWithRed:r * 0.18 + 0.82 green:g * 0.18 + 0.82 blue:b * 0.18 + 0.82 alpha:0.97])
+        : [UIColor colorWithWhite:dark ? 0.14 : 0.93 alpha:0.96];
+    self.titleLabel.textColor = [self.settings[@"titleFromArtwork"] boolValue]
+        ? textAccent : [UIColor colorWithWhite:dark ? 0.96 : 0.15 alpha:1];
+    self.artistLabel.textColor = [self.settings[@"artistFromArtwork"] boolValue]
+        ? [textAccent colorWithAlphaComponent:0.78]
+        : [UIColor colorWithWhite:dark ? 0.76 : 0.36 alpha:1];
+    self.progress.minimumTrackTintColor = progressColor;
+    self.progress.maximumTrackTintColor = [UIColor colorWithWhite:dark ? 0.85 : 0.62 alpha:dark ? 0.3 : 0.6];
+    self.backgroundProgress.backgroundColor = [progressColor colorWithAlphaComponent:dark ? 0.36 : 0.18];
+    UIColor *ringColor = progressColor;
     self.artworkProgressTrack.strokeColor = [ringColor colorWithAlphaComponent:0.25].CGColor;
     self.artworkProgressRing.strokeColor = ringColor.CGColor;
-    self.previousButton.tintColor = accent;
-    self.playButton.tintColor = accent;
-    self.nextButton.tintColor = accent;
+    self.previousButton.tintColor = textAccent;
+    self.playButton.tintColor = textAccent;
+    self.nextButton.tintColor = textAccent;
 }
 
 static NSString *QTime(NSTimeInterval value) {
@@ -745,11 +769,7 @@ static NSString *QTextInView(UIView *root) {
     }
 }
 static CGFloat QArtworkSeekFraction(UIView *area, CGPoint point) {
-    CGFloat dx = point.x - CGRectGetMidX(area.bounds);
-    CGFloat dy = CGRectGetMidY(area.bounds) - point.y;
-    CGFloat angle = atan2(dx, dy);
-    if (angle < 0) angle += 2 * M_PI;
-    return angle / (2 * M_PI);
+    return MIN(1, MAX(0, point.x / MAX(1, area.bounds.size.width)));
 }
 - (void)artworkSeekTapped:(UITapGestureRecognizer *)gesture {
     UIView *area = gesture.view;
