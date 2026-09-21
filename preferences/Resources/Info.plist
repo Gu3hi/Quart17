@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.gushi.quart17prefs</string>
+<key>CFBundleName</key><string>Quart17</string>
+<key>CFBundleExecutable</key><string>Quart17Prefs</string>
+<key>CFBundlePackageType</key><string>BNDL</string>
+<key>NSPrincipalClass</key><string>QRootListController</string>
+</dict></plist>

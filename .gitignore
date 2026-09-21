@@ -1,0 +1,9 @@
+.theos/
+packages/
+*.deb
+*.zip
+*.ips
+build_remote.py
+frame*.png
+video_contact.jpg
+.DS_Store

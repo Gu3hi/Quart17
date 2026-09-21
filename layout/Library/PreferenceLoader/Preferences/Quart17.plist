@@ -1,0 +1,1 @@
+{ entry = { bundle = Quart17Prefs; cell = PSLinkCell; detail = QRootListController; icon = icon.png; isController = 1; label = Quart17; }; }
