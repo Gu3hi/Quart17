@@ -78,7 +78,7 @@
             if (icon) [specifier setProperty:icon forKey:@"iconImage"];
             if (!self.isChinese) {
                 if ([key isEqualToString:@"progressStyle"]) {
-                    [specifier setProperty:@[@"Player background", @"Bottom bar", @"Artwork ring"] forKey:@"validTitles"];
+                    [specifier setProperty:@[@"Background", @"Bottom", @"Artwork ring"] forKey:@"validTitles"];
                 }
                 NSString *translatedName = english[specifier.name];
                 if (translatedName) specifier.name = translatedName;
