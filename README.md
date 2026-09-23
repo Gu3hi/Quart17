@@ -7,9 +7,12 @@ Quart inspired Lock Screen player and notification styling for iOS 17. RootHide 
 - Capsule Lock Screen player with circular artwork, scrolling title and artist, playback controls, and three exclusive seekable progress styles: player background, bottom bar, or clockwise artwork ring.
 - Artwork colors for the player background, text, and progress.
 - Dark notification cards and round application icons.
+- Adjustable Lock Screen notification list size that scales cards, spacing, and group headings together.
+- On the Lock Screen, two downward swipes on the right half clear ordinary notifications while preserving media controls and Live Activities. The left half does not open Search. Clearing can give a light haptic response.
 - Chinese and English settings, with a master switch and live style refresh that keeps audio playing.
 - One corner slider controls the player, background progress fill, artwork, and artwork progress ring. The playback placeholder follows the current system language.
 - Dark mode dims the player background while keeping progress visible. The artwork ring seeks with the same left-to-right drag direction as the background progress style.
+- The two size sliders use dedicated rows with a title, value, and unobstructed track.
 
 The four control icons are replaceable PNG files at `/Library/Application Support/Quart17/Buttons/previous.png`, `play.png`, `pause.png`, and `next.png` under the jailbreak root. Use Settings → Quart17 → Button icon folder to see and copy the actual device path, which is randomized on RootHide and normally starts with `/var/jb` on standard rootless systems. Replace a file and use Settings → Quart17 → Refresh to reload it. PNG files are scaled to the control size and tinted to match the player; if a file is absent, the built-in outline remains available. Pause shows a square while playback is active; play shows a circle when paused.
 

@@ -249,6 +249,9 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 @property (nonatomic) NSTimeInterval lastReportedDuration;
 @property (nonatomic) CGFloat dragStartProgress;
 @property (nonatomic) CGFloat dragStartX;
+- (CGFloat)sizeFactor;
+- (CGFloat)artworkSide;
+- (void)updateScaledFonts;
 @end
 
 @implementation QPlayerView
@@ -416,6 +419,24 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
     [self refresh];
 }
 
+// 尺寸系数：本视图按基准设计高度 88pt 设计。外层用 transform 缩放时，
+// 传入的 bounds 已是"缩放后"的尺寸，所以这里算出的系数同时包含两层缩放，
+// 内部（封面/按钮/进度条/边距/字号）据此一起缩。
+- (CGFloat)sizeFactor {
+    CGFloat h = self.bounds.size.height;
+    if (h <= 0 || !isfinite(h)) return 1.0;
+    return h / (CGFloat)kQPlayerDesignHeight;
+}
+
+// 按设计高度 88pt 推出的封边尺寸
+static const CGFloat kQPlayerDesignHeight = 88.0;
+static const CGFloat kQPlayerArtworkDesign = 60.0;
+
+- (CGFloat)artworkSide {
+    CGFloat art = kQPlayerArtworkDesign * [self sizeFactor];
+    return MIN(MAX(art, 34.0), 60.0);
+}
+
 - (void)applySettings:(NSDictionary *)settings {
     self.settings = settings;
     NSInteger progressStyle = [settings[@"progressStyle"] integerValue];
@@ -425,7 +446,7 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
     CGFloat radius = self.bounds.size.height * roundness / 2;
     self.layer.cornerRadius = radius;
     self.layer.cornerCurve = kCACornerCurveCircular;
-    self.artwork.layer.cornerRadius = 30 * roundness;
+    self.artwork.layer.cornerRadius = [self artworkSide] * roundness / 2;
     self.artwork.layer.cornerCurve = kCACornerCurveCircular;
     BOOL showProgress = [settings[@"showProgress"] boolValue];
     self.progress.hidden = !showProgress || progressStyle != 1;
@@ -440,6 +461,7 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
     self.routeView.hidden = [settings[@"hideRoute"] boolValue];
     [self updateControlImages];
     [self updateAccent];
+    [self updateScaledFonts];   // 字号只在这里更新（布局之外），避免布局递归
     [self setNeedsLayout];
 }
 
@@ -909,18 +931,22 @@ static CGFloat QArtworkSeekFraction(UIView *area, CGPoint point) {
     self.backgroundProgress.layer.allowsEdgeAntialiasing = YES;
     [self updateProgressFill];
     self.backgroundSeekArea.frame = self.bounds;
-    CGFloat pad = 12;
-    CGFloat art = MIN(60, MAX(46, h - 23));
+    // 内部度量随 sizeFactor 等比：单元格内部布局跟着缩，配合外层的 transform，
+    // 视觉上才是整体缩放而不是"外框缩小、内容不变"。
+    CGFloat c = [self sizeFactor];
+    CGFloat pad = 12 * c;
+    CGFloat art = [self artworkSide];
     NSInteger progressStyle = [self.settings[@"progressStyle"] integerValue];
     BOOL bottomProgress = [self.settings[@"showProgress"] boolValue] && progressStyle == 1;
-    CGFloat verticalShift = bottomProgress ? -3 : 0;
+    CGFloat verticalShift = bottomProgress ? -3 * c : 0;
     CGFloat artY = (h - art) / 2 + verticalShift;
     self.artwork.frame = CGRectMake(pad, artY, art, art);
     self.artwork.layer.cornerRadius = art * roundness / 2;
     self.artwork.layer.cornerCurve = kCACornerCurveCircular;
-    CGRect ringFrame = CGRectInset(self.artwork.frame, -3, -3);
+    CGRect ringFrame = CGRectInset(self.artwork.frame, -3 * c, -3 * c);
     self.artworkSeekArea.frame = self.bounds;
-    CGRect ringRect = CGRectInset(CGRectMake(0, 0, ringFrame.size.width, ringFrame.size.height), 1.25, 1.25);
+    CGFloat ringRectPad = 1.25 * c;
+    CGRect ringRect = CGRectInset(CGRectMake(0, 0, ringFrame.size.width, ringFrame.size.height), ringRectPad, ringRectPad);
     CGFloat left = CGRectGetMinX(ringRect), right = CGRectGetMaxX(ringRect);
     CGFloat top = CGRectGetMinY(ringRect), bottom = CGRectGetMaxY(ringRect);
     CGFloat ringRadius = MIN(ringRect.size.width, ringRect.size.height) * roundness / 2;
@@ -943,22 +969,38 @@ static CGFloat QArtworkSeekFraction(UIView *area, CGPoint point) {
     self.artworkProgressRing.path = ringPath;
     [CATransaction commit];
     CGPathRelease(ringPath);
-    CGFloat textX = pad + art + 12;
-    CGFloat controlsWidth = 110;
-    CGFloat textW = MAX(50, w - textX - controlsWidth - 12);
-    self.titleLabel.frame = CGRectMake(textX, h / 2 - 20 + verticalShift, textW, 20);
-    self.artistLabel.frame = CGRectMake(textX, h / 2 + 3 + verticalShift, textW, 17);
+    CGFloat textX = pad + art + 12 * c;
+    CGFloat controlsWidth = 110 * c;
+    CGFloat textW = MAX(50 * c, w - textX - controlsWidth - 12 * c);
+    self.titleLabel.frame = CGRectMake(textX, h / 2 - 20 * c + verticalShift, textW, 20 * c);
+    self.artistLabel.frame = CGRectMake(textX, h / 2 + 3 * c + verticalShift, textW, 17 * c);
 
-    CGFloat buttonsX = w - controlsWidth - 8;
-    CGFloat buttonsY = (h - 34) / 2 + verticalShift;
-    self.previousButton.frame = CGRectMake(buttonsX, buttonsY, 33, 36);
-    self.playButton.frame = CGRectMake(buttonsX + 35, buttonsY - 3, 40, 40);
-    self.nextButton.frame = CGRectMake(buttonsX + 77, buttonsY, 33, 36);
+    CGFloat buttonsX = w - controlsWidth - 8 * c;
+    CGFloat buttonsY = (h - 34 * c) / 2 + verticalShift;
+    self.previousButton.frame = CGRectMake(buttonsX, buttonsY, 33 * c, 36 * c);
+    self.playButton.frame = CGRectMake(buttonsX + 35 * c, buttonsY - 3 * c, 40 * c, 40 * c);
+    self.nextButton.frame = CGRectMake(buttonsX + 77 * c, buttonsY, 33 * c, 36 * c);
+    self.previousButton.iconSize = 24 * c;
+    self.playButton.iconSize = 36 * c;
+    self.nextButton.iconSize = 24 * c;
 
-    self.progress.frame = CGRectMake(textX, h - 31, MAX(20, w - textX - 17), 30);
+    self.progress.frame = CGRectMake(textX, h - 31 * c, MAX(20 * c, w - textX - 17 * c), 30 * c);
     self.elapsedLabel.hidden = YES;
     self.remainingLabel.hidden = YES;
-    self.routeView.frame = CGRectMake(w - 39, 4, 26, 26);
+    self.routeView.frame = CGRectMake(w - 39 * c, 4 * c, 26 * c, 26 * c);
+}
+
+// 字号不在 layoutSubviews 里设：QMarqueeLabel 的 setFont: 内部会 setNeedsLayout，
+// 在布局过程中赋 font 会形成 layout → setFont → setNeedsLayout → layout 的无限递归，
+// 每帧新建 UIFont 直到内存触顶（曾导致 SpringBoard EXC_RESOURCE）。
+// 改为在布局之外调用，且仅在字号真正变化时才赋值。
+- (void)updateScaledFonts {
+    CGFloat c = [self sizeFactor];
+    CGFloat titleSize = 15 * c, artistSize = 12 * c;
+    if (fabs(self.titleLabel.font.pointSize - titleSize) > 0.01)
+        self.titleLabel.font = [UIFont systemFontOfSize:titleSize weight:UIFontWeightSemibold];
+    if (fabs(self.artistLabel.font.pointSize - artistSize) > 0.01)
+        self.artistLabel.font = [UIFont systemFontOfSize:artistSize weight:UIFontWeightMedium];
 }
 
 @end
