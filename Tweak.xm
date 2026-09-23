@@ -2,6 +2,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <CoreFoundation/CoreFoundation.h>
+#import <stdlib.h>
 #import "QPlayerView.h"
 
 static NSString *const QPrefs = @"com.gushi.quart17";
@@ -10,23 +11,34 @@ static NSHashTable<QPlayerView *> *qActivePlayers;
 static NSHashTable<UIView *> *qActivePlatters;
 static NSHashTable<UIView *> *qActiveNotifications;
 static NSHashTable<UIView *> *qActiveLists;
+static NSHashTable<UIView *> *qActiveBanners;
 static void *QOriginalStyleKey = &QOriginalStyleKey;
 static void *QOwnLayerTransformKey = &QOwnLayerTransformKey;
 static void *QOriginalLayerTransformKey = &QOriginalLayerTransformKey;
 static void *QScalePendingKey = &QScalePendingKey;
-static void *QScaleDiagnosticKey = &QScaleDiagnosticKey;
 static void *QOriginalIndicatorKey = &QOriginalIndicatorKey;
+static void *QBannerOriginalTransformKey = &QBannerOriginalTransformKey;
+static void *QBannerOwnedTransformKey = &QBannerOwnedTransformKey;
+static void *QBannerShadowHiddenKey = &QBannerShadowHiddenKey;
+static void *QBannerGlassKey = &QBannerGlassKey;
+static void *QBannerGlassSheenKey = &QBannerGlassSheenKey;
+static void *QBannerGlassBackdropKey = &QBannerGlassBackdropKey;
+static void *QBannerGlassBlurKey = &QBannerGlassBlurKey;
+static void *QBannerGlassMeshKey = &QBannerGlassMeshKey;
 static __weak id qMasterList;
 static CFAbsoluteTime qLastRightSwipe;
 static void *QSearchPanInstalledKey = &QSearchPanInstalledKey;
-static void *QSearchPanCountedKey = &QSearchPanCountedKey;
+static void *QSearchPanEligibleKey = &QSearchPanEligibleKey;
+static void *QSearchPanQualifiedKey = &QSearchPanQualifiedKey;
 
 
 
 static void QStyle(UIView *root);
+static CGFloat QShrinkScale(void);
 static void QApplyListScaling(UIView *list);
 static void QScheduleListScaling(UIView *list);
 static void QClearOwnLayerTransform(UIView *list);
+static void QApplyBannerScaling(UIView *banner);
 
 @interface NCNotificationShortLookViewController : UIViewController
 - (UIView *)viewForPreview;
@@ -37,6 +49,8 @@ static void QLoadSettings(void) {
     qSettings = [@{ @"masterEnabled": @YES, @"enabled": @YES, @"darkCards": @NO,
                     @"roundIcons": @YES, @"radius": @24,
                     @"playerEnabled": @YES, @"disableListScaling": @NO,
+                    @"scaleBanners": @NO, @"glassBanners": @NO,
+                    @"glassBlur": @8, @"glassRefraction": @12, @"glassHighlight": @0.5,
                     @"clearAllEnabled": @YES, @"clearHapticEnabled": @YES,
                     @"showProgress": @YES, @"backgroundProgress": @YES, @"hideRoute": @YES,
                     @"hideControls": @NO,
@@ -58,12 +72,13 @@ static void QChanged(CFNotificationCenterRef center, void *observer, CFStringRef
         QLoadSettings();
         NSMutableDictionary *beforeStyle = [previous mutableCopy];
         NSMutableDictionary *afterStyle = [qSettings mutableCopy];
-        for (NSString *key in @[@"widthScale", @"disableListScaling"]) {
+        for (NSString *key in @[@"widthScale", @"disableListScaling", @"scaleBanners"]) {
             [beforeStyle removeObjectForKey:key];
             [afterStyle removeObjectForKey:key];
         }
         if ([beforeStyle isEqualToDictionary:afterStyle]) {
             for (UIView *list in qActiveLists.allObjects) QScheduleListScaling(list);
+            for (UIView *banner in qActiveBanners.allObjects) QApplyBannerScaling(banner);
             return;
         }
         for (QPlayerView *player in qActivePlayers.allObjects) {
@@ -76,6 +91,7 @@ static void QChanged(CFNotificationCenterRef center, void *observer, CFStringRef
         }
         for (UIView *notification in qActiveNotifications.allObjects) QStyle(notification);
         for (UIView *list in qActiveLists.allObjects) QScheduleListScaling(list);
+        for (UIView *banner in qActiveBanners.allObjects) QApplyBannerScaling(banner);
     });
 }
 
@@ -150,6 +166,42 @@ static BOOL QHasAncestor(UIView *view, NSString *className) {
     return NO;
 }
 
+static BOOL QIsLockScreenVisible(void) {
+    Class lockClass = objc_getClass("SBLockScreenManager");
+    id manager = [lockClass respondsToSelector:@selector(sharedInstance)]
+        ? ((id (*)(id, SEL))objc_msgSend)(lockClass, @selector(sharedInstance)) : nil;
+    return [manager respondsToSelector:@selector(isLockScreenVisible)] &&
+           ((BOOL (*)(id, SEL))objc_msgSend)(manager, @selector(isLockScreenVisible));
+}
+
+static BOOL QIsLockScreenNotification(UIView *view) {
+    if (!view.window || ![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"] ||
+        !QIsLockScreenVisible()) return NO;
+    for (UIView *ancestor = view; ancestor; ancestor = ancestor.superview) {
+        if ([NSStringFromClass(ancestor.class) containsString:@"NCNotificationList"]) return YES;
+    }
+    return NO;
+}
+
+static BOOL QIsDesktopBanner(UIView *view) {
+    if (!view.window || ![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"])
+        return NO;
+    for (UIView *ancestor = view; ancestor; ancestor = ancestor.superview) {
+        if ([NSStringFromClass(ancestor.class) containsString:@"NCNotificationList"]) return NO;
+    }
+    return !QIsLockScreenVisible();
+}
+
+static UIView *QBannerSurface(UIView *view) {
+    for (UIView *ancestor = view; ancestor && ![ancestor isKindOfClass:UIWindow.class];
+         ancestor = ancestor.superview) {
+        if ([NSStringFromClass(ancestor.class) containsString:@"NCDimmableView"]) return ancestor;
+    }
+    // Wait until the short look has been inserted into its banner host. Scaling
+    // an inner platter before then leaves the material backing at native size.
+    return nil;
+}
+
 static void QRememberStyle(UIView *view) {
     if (objc_getAssociatedObject(view, QOriginalStyleKey)) return;
     NSDictionary *state = @{
@@ -182,18 +234,203 @@ static void QRestoreStyle(UIView *root) {
     }
 }
 
+// CAMutableMeshTransform uses these C layouts on arm64, as in Burger Swift's
+// iOS 17 glass surface. The mesh displaces backdrop sampling toward the
+// middle of the rounded edge while leaving the card content untouched.
+typedef struct { CGFloat x, y, z; } QGlassPoint3D;
+typedef struct { CGPoint from; QGlassPoint3D to; } QGlassVertex;
+typedef struct { uint32_t indices[4]; float weights[4]; } QGlassFace;
+
+static NSArray<NSNumber *> *QGlassGrid(CGFloat length) {
+    NSMutableSet<NSNumber *> *values = [NSMutableSet setWithObjects:@0, @(length), nil];
+    const CGFloat edge[] = {2, 5, 8, 12, 18, 25, 34};
+    for (NSUInteger i = 0; i < sizeof(edge) / sizeof(edge[0]); i++) {
+        if (edge[i] < length / 2) {
+            [values addObject:@(edge[i])];
+            [values addObject:@(length - edge[i])];
+        }
+    }
+    for (CGFloat point = 48; point < length - 40; point += 32)
+        [values addObject:@(point)];
+    return [[values allObjects] sortedArrayUsingSelector:@selector(compare:)];
+}
+
+static CGFloat QGlassSDF(CGFloat x, CGFloat y, CGSize size, CGFloat radius) {
+    CGFloat qx = fabs(x - size.width / 2) - size.width / 2 + radius;
+    CGFloat qy = fabs(y - size.height / 2) - size.height / 2 + radius;
+    return hypot(MAX(qx, 0), MAX(qy, 0)) + MIN(MAX(qx, qy), 0) - radius;
+}
+
+static void QUpdateGlassRefraction(CALayer *backdrop, CGSize size, CGFloat radius,
+                                   CGFloat magnitude, UIVisualEffectView *glass) {
+    Class meshClass = NSClassFromString(@"CAMutableMeshTransform");
+    SEL create = NSSelectorFromString(@"meshTransformWithVertexCount:vertices:faceCount:faces:depthNormalization:");
+    if (!backdrop || !meshClass || ![meshClass respondsToSelector:create] ||
+        size.width < 30 || size.height < 30) return;
+    NSString *signature = [NSString stringWithFormat:@"%.1f:%.1f:%.1f:%.1f",
+                           size.width, size.height, radius, magnitude];
+    if ([signature isEqual:objc_getAssociatedObject(glass, QBannerGlassMeshKey)]) return;
+    NSArray<NSNumber *> *xs = QGlassGrid(size.width);
+    NSArray<NSNumber *> *ys = QGlassGrid(size.height);
+    NSUInteger columns = xs.count, rows = ys.count;
+    NSUInteger vertexCount = columns * rows;
+    NSUInteger faceCount = (columns - 1) * (rows - 1);
+    QGlassVertex *vertices = (QGlassVertex *)calloc(vertexCount, sizeof(QGlassVertex));
+    QGlassFace *faces = (QGlassFace *)calloc(faceCount, sizeof(QGlassFace));
+    if (!vertices || !faces) { free(vertices); free(faces); return; }
+    CGFloat edgeDistance = 13;
+    for (NSUInteger row = 0; row < rows; row++) {
+        CGFloat y = ys[row].doubleValue;
+        for (NSUInteger column = 0; column < columns; column++) {
+            CGFloat x = xs[column].doubleValue;
+            CGFloat distance = -QGlassSDF(x, y, size, radius);
+            CGFloat weight = MAX(0, MIN(1, 1 - distance / edgeDistance));
+            weight *= weight * (3 - 2 * weight);
+            CGFloat nx = QGlassSDF(x + 0.5, y, size, radius) - QGlassSDF(x - 0.5, y, size, radius);
+            CGFloat ny = QGlassSDF(x, y + 0.5, size, radius) - QGlassSDF(x, y - 0.5, size, radius);
+            CGFloat norm = hypot(nx, ny);
+            if (norm > 0) { nx /= norm; ny /= norm; }
+            NSUInteger index = row * columns + column;
+            vertices[index].from = CGPointMake(MAX(0, MIN(1, (x - nx * weight * magnitude) / size.width)),
+                                                MAX(0, MIN(1, (y - ny * weight * magnitude) / size.height)));
+            vertices[index].to = (QGlassPoint3D){x / size.width, y / size.height, 0};
+        }
+    }
+    for (NSUInteger row = 0; row + 1 < rows; row++) {
+        for (NSUInteger column = 0; column + 1 < columns; column++) {
+            QGlassFace *face = &faces[row * (columns - 1) + column];
+            uint32_t top = (uint32_t)(row * columns + column);
+            face->indices[0] = top;
+            face->indices[1] = top + 1;
+            face->indices[2] = top + (uint32_t)columns + 1;
+            face->indices[3] = top + (uint32_t)columns;
+        }
+    }
+    @try {
+        IMP imp = [meshClass methodForSelector:create];
+        id (*makeMesh)(id, SEL, NSUInteger, const void *, NSUInteger, const void *, id) =
+            (id (*)(id, SEL, NSUInteger, const void *, NSUInteger, const void *, id))imp;
+        id mesh = makeMesh(meshClass, create, vertexCount, vertices, faceCount, faces, @"none");
+        if (mesh) {
+            SEL steps = NSSelectorFromString(@"setSubdivisionSteps:");
+            if ([mesh respondsToSelector:steps])
+                ((void (*)(id, SEL, NSInteger))objc_msgSend)(mesh, steps, 0);
+            [backdrop setValue:mesh forKey:@"meshTransform"];
+            objc_setAssociatedObject(glass, QBannerGlassMeshKey, signature,
+                                     OBJC_ASSOCIATION_COPY_NONATOMIC);
+        }
+    } @catch (NSException *exception) {
+        // Keep the undistorted live backdrop if the private mesh API differs.
+    }
+    free(vertices);
+    free(faces);
+}
+
+// Keep the glass behind Apple's content and actions. Use the same surface for
+// desktop banners and ordinary Lock Screen notifications, never Live Activities.
+static void QApplyBannerGlass(UIView *root, UIView *material) {
+    if (!material) return;
+    UIVisualEffectView *glass = objc_getAssociatedObject(material, QBannerGlassKey);
+    BOOL enabled = [qSettings[@"masterEnabled"] boolValue] &&
+        [qSettings[@"enabled"] boolValue] && [qSettings[@"glassBanners"] boolValue] &&
+        (QIsDesktopBanner(root) || QIsLockScreenNotification(root));
+    if (!enabled || !material.superview) {
+        [glass removeFromSuperview];
+        objc_setAssociatedObject(material, QBannerGlassKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+    if (!glass) {
+        glass = [[UIVisualEffectView alloc] initWithEffect:nil];
+        glass.userInteractionEnabled = NO;
+        glass.clipsToBounds = YES;
+        glass.layer.cornerCurve = kCACornerCurveContinuous;
+        // iOS 17's stock material adds a gray tint. A live backdrop layer lets
+        // the banner sample the app underneath with much less color wash.
+        // Keep the public blur effect as a fallback if that layer is missing.
+        Class backdropClass = NSClassFromString(@"CABackdropLayer");
+        Class filterClass = NSClassFromString(@"CAFilter");
+        SEL filterSelector = NSSelectorFromString(@"filterWithName:");
+        if (backdropClass && filterClass && [filterClass respondsToSelector:filterSelector]) {
+            @try {
+                CALayer *backdrop = ((id (*)(id, SEL))objc_msgSend)(backdropClass, @selector(layer));
+                id blur = ((id (*)(id, SEL, id))objc_msgSend)(filterClass, filterSelector, @"gaussianBlur");
+                if (backdrop && blur) {
+                    [blur setValue:@8 forKey:@"inputRadius"];
+                    [backdrop setValue:@[blur] forKey:@"filters"];
+                    [backdrop setValue:@1 forKey:@"scale"];
+                    backdrop.rasterizationScale = UIScreen.mainScreen.scale;
+                    [glass.layer insertSublayer:backdrop atIndex:0];
+                    objc_setAssociatedObject(glass, QBannerGlassBackdropKey, backdrop,
+                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    objc_setAssociatedObject(glass, QBannerGlassBlurKey, blur,
+                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                }
+            } @catch (NSException *exception) {
+                // Unsupported SpringBoard composition falls back to UIKit.
+            }
+        }
+        CAGradientLayer *sheen = [CAGradientLayer layer];
+        sheen.locations = @[@0, @0.48, @1];
+        [glass.contentView.layer addSublayer:sheen];
+        objc_setAssociatedObject(glass, QBannerGlassSheenKey, sheen, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(material, QBannerGlassKey, glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    BOOL dark = root.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
+    UIBlurEffectStyle style = dark ? UIBlurEffectStyleSystemUltraThinMaterialDark :
+                                     UIBlurEffectStyleSystemUltraThinMaterialLight;
+    if (!objc_getAssociatedObject(glass, QBannerGlassBackdropKey) &&
+        (!glass.effect || glass.overrideUserInterfaceStyle != (dark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight))) {
+        glass.overrideUserInterfaceStyle = dark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
+        glass.effect = [UIBlurEffect effectWithStyle:style];
+    }
+    glass.frame = material.frame;
+    glass.autoresizingMask = material.autoresizingMask;
+    CALayer *backdrop = objc_getAssociatedObject(glass, QBannerGlassBackdropKey);
+    backdrop.frame = glass.bounds;
+    CGFloat blurRadius = [qSettings[@"glassBlur"] doubleValue];
+    CGFloat refraction = [qSettings[@"glassRefraction"] doubleValue];
+    CGFloat highlight = [qSettings[@"glassHighlight"] doubleValue];
+    blurRadius = isfinite(blurRadius) ? MAX(0, MIN(18, blurRadius)) : 8;
+    refraction = isfinite(refraction) ? MAX(0, MIN(24, refraction)) : 12;
+    highlight = isfinite(highlight) ? MAX(0, MIN(1, highlight)) : 0.5;
+    id blurFilter = objc_getAssociatedObject(glass, QBannerGlassBlurKey);
+    if (blurFilter) [blurFilter setValue:@(blurRadius) forKey:@"inputRadius"];
+    QUpdateGlassRefraction(backdrop, glass.bounds.size, glass.layer.cornerRadius,
+                           refraction, glass);
+    glass.layer.cornerRadius = material.layer.cornerRadius;
+    glass.layer.borderWidth = 0.75;
+    // A white rim disappears against bright apps. Use a faint dark outline in
+    // light mode while retaining the specular top edge inside the material.
+    glass.layer.borderColor = (dark ? [UIColor colorWithWhite:1 alpha:0.26] :
+                                    [UIColor colorWithWhite:0 alpha:0.16]).CGColor;
+    CAGradientLayer *sheen = objc_getAssociatedObject(glass, QBannerGlassSheenKey);
+    sheen.frame = glass.bounds;
+    sheen.colors = dark ? @[(id)[UIColor colorWithWhite:1 alpha:0.26 * highlight].CGColor,
+                             (id)[UIColor colorWithWhite:1 alpha:0.04 * highlight].CGColor,
+                             (id)[UIColor colorWithWhite:0 alpha:0.13].CGColor]
+                        : @[(id)[UIColor colorWithWhite:1 alpha:0.52 * highlight].CGColor,
+                             (id)[UIColor colorWithWhite:1 alpha:0.05 * highlight].CGColor,
+                             (id)[UIColor colorWithWhite:0 alpha:0.08].CGColor];
+    if (glass.superview != material.superview)
+        [material.superview insertSubview:glass aboveSubview:material];
+    material.hidden = YES;
+}
+
 static void QStyle(UIView *root) {
     if (!root) return;
     [qActiveNotifications addObject:root];
     QRestoreStyle(root);
-    if (![qSettings[@"masterEnabled"] boolValue] || ![qSettings[@"enabled"] boolValue]) return;
+    UIView *material = QFind(root, @"MTMaterialView");
+    if (![qSettings[@"masterEnabled"] boolValue] || ![qSettings[@"enabled"] boolValue]) {
+        QApplyBannerGlass(root, material);
+        return;
+    }
     CGFloat radius = MAX(8, MIN(40, [qSettings[@"radius"] doubleValue]));
     QRememberStyle(root);
     root.layer.cornerRadius = radius;
     root.layer.cornerCurve = kCACornerCurveContinuous;
     root.clipsToBounds = YES;
 
-    UIView *material = QFind(root, @"MTMaterialView");
     if (material) {
         QRememberStyle(material);
         material.layer.cornerRadius = radius;
@@ -202,6 +439,7 @@ static void QStyle(UIView *root) {
         if ([qSettings[@"darkCards"] boolValue]) {
             material.backgroundColor = [UIColor colorWithWhite:0.055 alpha:0.82];
         }
+        QApplyBannerGlass(root, material);
     }
 
     // Keep Apple's notification actions, privacy rules, and accessibility hierarchy.
@@ -247,6 +485,29 @@ static void *QSpringBoardPlayerKey = &QSpringBoardPlayerKey;
         preview = ((id (*)(id, SEL))objc_msgSend)(self, @selector(viewForPreview));
     }
     QStyle(preview ?: self.view);
+    if (QIsDesktopBanner(self.view)) {
+        UIView *surface = QBannerSurface(preview ?: self.view);
+        if (surface) {
+            [qActiveBanners addObject:surface];
+            QApplyBannerScaling(surface);
+        }
+    }
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    UIView *view = self.view;
+    UIView *preview = [self respondsToSelector:@selector(viewForPreview)]
+        ? ((id (*)(id, SEL))objc_msgSend)(self, @selector(viewForPreview)) : nil;
+    if (QIsLockScreenNotification(preview ?: view)) QStyle(preview ?: view);
+    if (!QIsDesktopBanner(view)) return;
+    UIView *surface = QBannerSurface(view);
+    if (!surface) return;
+    [qActiveBanners addObject:surface];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        QApplyBannerScaling(surface);
+    });
 }
 
 %end
@@ -261,6 +522,54 @@ static CGFloat QShrinkScale(void) {
     if (![raw isKindOfClass:NSNumber.class]) return 1.0;
     CGFloat scale = [raw doubleValue];
     return isfinite(scale) && scale > 0 ? MIN(1.0, MAX(0.7, scale)) : 1.0;
+}
+
+static void QApplyBannerScaling(UIView *banner) {
+    if (!banner || !banner.window) return;
+    CGFloat scale = [qSettings[@"scaleBanners"] boolValue] ? QShrinkScale() : 1.0;
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:banner];
+    while (queue.count) {
+        UIView *view = queue.lastObject;
+        [queue removeLastObject];
+        if ([NSStringFromClass(view.class) containsString:@"MTShadowView"]) {
+            NSNumber *originalHidden = objc_getAssociatedObject(view, QBannerShadowHiddenKey);
+            if (scale < 1.0) {
+                if (!originalHidden)
+                    objc_setAssociatedObject(view, QBannerShadowHiddenKey, @(view.hidden),
+                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                view.hidden = YES;
+            } else if (originalHidden) {
+                view.hidden = originalHidden.boolValue;
+                objc_setAssociatedObject(view, QBannerShadowHiddenKey, nil,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+        }
+        [queue addObjectsFromArray:view.subviews];
+    }
+    NSValue *owned = objc_getAssociatedObject(banner, QBannerOwnedTransformKey);
+    NSValue *original = objc_getAssociatedObject(banner, QBannerOriginalTransformKey);
+    CATransform3D current = banner.layer.sublayerTransform;
+    if (scale >= 1.0) {
+        if (owned && original && CATransform3DEqualToTransform(current, owned.CATransform3DValue))
+            banner.layer.sublayerTransform = original.CATransform3DValue;
+        objc_setAssociatedObject(banner, QBannerOwnedTransformKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(banner, QBannerOriginalTransformKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+    if (!owned) {
+        if (!CATransform3DIsIdentity(current)) return;
+        objc_setAssociatedObject(banner, QBannerOriginalTransformKey,
+                                 [NSValue valueWithCATransform3D:current],
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    } else if (!CATransform3DEqualToTransform(current, owned.CATransform3DValue)) {
+        return;
+    }
+    CATransform3D target = CATransform3DMakeScale(scale, scale, 1.0);
+    if (CATransform3DEqualToTransform(current, target)) return;
+    objc_setAssociatedObject(banner, QBannerOwnedTransformKey,
+                             [NSValue valueWithCATransform3D:target],
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    banner.layer.sublayerTransform = target;
 }
 
 static void QUpdateScrollIndicator(UIView *view) {
@@ -371,6 +680,42 @@ static BOOL QIsCoverSheetScroll(UIView *view) {
     return NO;
 }
 
+static BOOL QIsRightCoverSheetPan(UIScrollView *scrollView) {
+    if (![qSettings[@"masterEnabled"] boolValue] || !QIsCoverSheetScroll(scrollView) ||
+        !scrollView.window) return NO;
+    UIPanGestureRecognizer *pan = scrollView.panGestureRecognizer;
+    CGPoint location = [pan locationInView:scrollView.window];
+    CGPoint translation = [pan translationInView:scrollView.window];
+    return location.x - translation.x >= CGRectGetMidX(scrollView.window.bounds);
+}
+
+static BOOL QScrollableNotificationsAtTop(UIWindow *window, BOOL *hasScrollableList) {
+    BOOL scrollable = NO;
+    for (UIView *list in qActiveLists.allObjects) {
+        if (list.window != window || ![list isKindOfClass:UIScrollView.class]) continue;
+        UIScrollView *scroll = (UIScrollView *)list;
+        CGFloat top = -scroll.adjustedContentInset.top;
+        if (scroll.contentSize.height > scroll.bounds.size.height + 24) scrollable = YES;
+        if (scroll.contentOffset.y > top + 8) {
+            if (hasScrollableList) *hasScrollableList = scrollable;
+            return NO;
+        }
+    }
+    if (hasScrollableList) *hasScrollableList = scrollable;
+    return YES;
+}
+
+static BOOL QTouchOnNotificationCell(UIWindow *window, CGPoint start) {
+    UIView *hit = [window hitTest:start withEvent:nil];
+    for (UIView *view = hit; view && view != window; view = view.superview) {
+        NSString *name = NSStringFromClass(view.class);
+        if ([name containsString:@"NCNotificationListCell"] ||
+            [name containsString:@"NCNotificationShortLookView"] ||
+            [name containsString:@"CSActivityItem"]) return YES;
+    }
+    return NO;
+}
+
 @interface QSearchPanHelper : NSObject
 + (instancetype)shared;
 - (void)track:(UIPanGestureRecognizer *)pan;
@@ -386,26 +731,44 @@ static BOOL QIsCoverSheetScroll(UIView *view) {
 }
 
 - (void)track:(UIPanGestureRecognizer *)pan {
-    if (pan.state == UIGestureRecognizerStateEnded ||
-        pan.state == UIGestureRecognizerStateCancelled ||
-        pan.state == UIGestureRecognizerStateFailed) {
-        objc_setAssociatedObject(pan, QSearchPanCountedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        return;
-    }
-    if (![qSettings[@"masterEnabled"] boolValue] || !QIsCoverSheetScroll(pan.view) ||
-        objc_getAssociatedObject(pan, QSearchPanCountedKey)) return;
+    if (![qSettings[@"masterEnabled"] boolValue] || !QIsCoverSheetScroll(pan.view)) return;
     UIWindow *window = pan.view.window;
     if (!window) return;
     CGPoint delta = [pan translationInView:window];
-    if (delta.y < 35 || delta.y < fabs(delta.x) * 1.3) return;
-    objc_setAssociatedObject(pan, QSearchPanCountedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    CGFloat startX = [pan locationInView:window].x - delta.x;
-    if (startX < CGRectGetMidX(window.bounds)) return;
+    NSNumber *eligible = objc_getAssociatedObject(pan, QSearchPanEligibleKey);
+    if (!eligible && (pan.state == UIGestureRecognizerStateBegan ||
+                      pan.state == UIGestureRecognizerStateChanged)) {
+        CGPoint start = [pan locationInView:window];
+        start.x -= delta.x;
+        start.y -= delta.y;
+        BOOL scrollable = NO;
+        BOOL atTop = QScrollableNotificationsAtTop(window, &scrollable);
+        BOOL allowed = QIsLockScreenVisible() && [qSettings[@"clearAllEnabled"] boolValue] &&
+            start.x >= CGRectGetMidX(window.bounds) && atTop &&
+            (!scrollable || !QTouchOnNotificationCell(window, start));
+        eligible = @(allowed);
+        objc_setAssociatedObject(pan, QSearchPanEligibleKey, eligible, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (!allowed) qLastRightSwipe = 0;
+    }
+    if (pan.state == UIGestureRecognizerStateChanged && eligible.boolValue) {
+        if (delta.y >= 95 && delta.y > fabs(delta.x) * 1.5)
+            objc_setAssociatedObject(pan, QSearchPanQualifiedKey, @YES,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+    if (pan.state != UIGestureRecognizerStateEnded &&
+        pan.state != UIGestureRecognizerStateCancelled &&
+        pan.state != UIGestureRecognizerStateFailed) return;
+    BOOL completed = pan.state == UIGestureRecognizerStateEnded && eligible.boolValue &&
+        [objc_getAssociatedObject(pan, QSearchPanQualifiedKey) boolValue] &&
+        QScrollableNotificationsAtTop(window, NULL);
+    objc_setAssociatedObject(pan, QSearchPanEligibleKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(pan, QSearchPanQualifiedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (!completed) { qLastRightSwipe = 0; return; }
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (qLastRightSwipe > 0 && now - qLastRightSwipe >= 0.25 &&
-        now - qLastRightSwipe <= 3.0) {
+    if (qLastRightSwipe > 0 && now - qLastRightSwipe <= 1.8) {
         qLastRightSwipe = 0;
-        if ([qSettings[@"clearAllEnabled"] boolValue] && QClearOrdinaryNotifications() &&
+        if (QClearOrdinaryNotifications() &&
             [qSettings[@"clearHapticEnabled"] boolValue]) {
             UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc]
                 initWithStyle:UIImpactFeedbackStyleLight];
@@ -425,20 +788,20 @@ static BOOL QIsCoverSheetScroll(UIView *view) {
 %hook SBSearchPresenter
 
 - (void)scrollViewWillBeginDragging:(UIScrollView *)scrollView {
-    if ([qSettings[@"masterEnabled"] boolValue] && QIsCoverSheetScroll(scrollView)) {
+    if (QIsRightCoverSheetPan(scrollView)) {
         UIPanGestureRecognizer *pan = scrollView.panGestureRecognizer;
         if (!objc_getAssociatedObject(pan, QSearchPanInstalledKey)) {
             [pan addTarget:[QSearchPanHelper shared] action:@selector(track:)];
             objc_setAssociatedObject(pan, QSearchPanInstalledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         [[QSearchPanHelper shared] track:pan];
-        return; // Do not start Spotlight's interactive presentation on the cover sheet.
+        return; // Right-half swipe is reserved for the clear gesture.
     }
     %orig;
 }
 
 - (void)scrollViewDidScroll:(UIScrollView *)scrollView {
-    if ([qSettings[@"masterEnabled"] boolValue] && QIsCoverSheetScroll(scrollView)) {
+    if (QIsRightCoverSheetPan(scrollView)) {
         [[QSearchPanHelper shared] track:scrollView.panGestureRecognizer];
         return;
     }
@@ -446,14 +809,16 @@ static BOOL QIsCoverSheetScroll(UIView *view) {
 }
 
 - (void)scrollViewWillEndDragging:(UIScrollView *)scrollView withVelocity:(CGPoint)velocity {
-    if ([qSettings[@"masterEnabled"] boolValue] && QIsCoverSheetScroll(scrollView)) return;
+    if (QIsRightCoverSheetPan(scrollView)) return;
     %orig;
 }
 
 - (BOOL)_canPresent {
     UIScrollView *tracked = [self respondsToSelector:@selector(trackingScrollView)]
         ? ((id (*)(id, SEL))objc_msgSend)(self, @selector(trackingScrollView)) : nil;
-    if ([qSettings[@"masterEnabled"] boolValue] && QIsCoverSheetScroll(tracked)) return NO;
+    UIPanGestureRecognizer *pan = tracked.panGestureRecognizer;
+    if ((pan.state == UIGestureRecognizerStateBegan ||
+         pan.state == UIGestureRecognizerStateChanged) && QIsRightCoverSheetPan(tracked)) return NO;
     return %orig;
 }
 
@@ -483,21 +848,6 @@ static void QScheduleListScaling(UIView *list) {
         objc_setAssociatedObject(list, QScalePendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         if (!list.window) return;
         QApplyListScaling(list);
-        if (objc_getAssociatedObject(list, QScaleDiagnosticKey)) return;
-        objc_setAssociatedObject(list, QScaleDiagnosticKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            NSString *line = [NSString stringWithFormat:
-                @"Quart17 2.0.0 scale=%.3f class=%@ parent=%@ children=%lu bounds=%.1fx%.1f transform=%.3f,%.3f sublayer=%.3f\n",
-                QShrinkScale(), NSStringFromClass(list.class),
-                NSStringFromClass(list.superview.class), (unsigned long)list.subviews.count,
-                list.bounds.size.width, list.bounds.size.height, list.transform.a, list.transform.d,
-                list.layer.sublayerTransform.m11];
-            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                [line writeToFile:@"/var/mobile/Library/Quart17-scale-debug.txt"
-                        atomically:YES encoding:NSUTF8StringEncoding error:NULL];
-            });
-        });
     });
 }
 
@@ -584,6 +934,7 @@ static void QScheduleListScaling(UIView *list) {
         qActivePlatters = [NSHashTable weakObjectsHashTable];
         qActiveNotifications = [NSHashTable weakObjectsHashTable];
         qActiveLists = [NSHashTable weakObjectsHashTable];
+        qActiveBanners = [NSHashTable weakObjectsHashTable];
         QLoadSettings();
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
                                         QChanged, CFSTR("com.gushi.quart17/preferenceschanged"),

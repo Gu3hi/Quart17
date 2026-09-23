@@ -109,6 +109,8 @@ static void QWritePref(NSString *key, id value) {
 
 // 统一按「倍率 → 百分比」显示（0-100% 与 70-100% 两种范围都是同一个读法）
 - (NSString *)percentForValue:(double)v specifier:(PSSpecifier *)specifier {
+    if ([specifier.properties[@"unit"] isEqualToString:@"pt"])
+        return [NSString stringWithFormat:@"%.0f pt", round(v)];
     return [NSString stringWithFormat:@"%.0f%%", round(v * 100.0)];
 }
 
@@ -189,6 +191,7 @@ static void QWritePref(NSString *key, id value) {
             @"roundIcons": @"app.fill", @"clearAllEnabled": @"arrow.down.to.line",
             @"clearHapticEnabled": @"iphone.radiowaves.left.and.right",
             @"widthScale": @"rectangle.compress.vertical",
+            @"scaleBanners": @"rectangle.on.rectangle", @"glassBanners": @"sparkles.rectangle.stack",
             @"disableListScaling": @"arrow.up.left.and.arrow.down.right",
             @"playerEnabled": @"play.rectangle.fill",
             @"playerCornerRoundness": @"square.on.circle",
@@ -201,6 +204,9 @@ static void QWritePref(NSString *key, id value) {
         NSDictionary *english = @{
             @"启用插件": @"Enable Quart17", @"尺寸": @"Size", @"锁屏列表大小": @"Lock Screen list size",
             @"停用通知缩放": @"Disable notification scaling",
+            @"缩放桌面横幅": @"Scale notification banners",
+            @"横幅与锁屏玻璃": @"Banner & Lock Screen glass",
+            @"玻璃参数": @"Glass appearance",
             @"通知外观": @"Notifications",
             @"启用通知样式": @"Enable notification style", @"深色卡片": @"Dark cards",
             @"圆形应用图标": @"Round app icons",
@@ -222,9 +228,9 @@ static void QWritePref(NSString *key, id value) {
         };
         NSDictionary *englishFooters = @{
             @"关闭总开关会停用通知与锁屏播放器样式，并收起以下设置。": @"Turn off to disable both styles and collapse the options below.",
-            @"等比例缩小锁屏通知列表，通知、原生间距及分组标题一起缩小并对齐。": @"Scales the Lock Screen notification list, keeping cards, native spacing, and group headings aligned.",
+            @"锁屏列表大小控制锁屏通知；开启桌面横幅缩放后，弹出的横幅使用相同的大小。": @"Lock Screen list size controls Lock Screen notifications. Enable banner scaling to use the same size for incoming banners.",
             @"只控制通知卡片，不影响列表大小和锁屏播放器。": @"Only affects notification cards, not list size or the player.",
-            @"右半屏连续两次下滑清除普通通知，保留音乐控件和实时活动；左半屏下滑不触发搜索。": @"Swipe down twice on the right half to clear ordinary notifications while keeping media controls and Live Activities. A downward swipe on the left half does not open Search.",
+            @"从右半屏空白处连续两次下滑清除普通通知；滚动列表不会计入。保留音乐控件和实时活动；左半屏下滑打开系统搜索。": @"Swipe down twice from empty space on the right half to clear ordinary notifications. Scrolling the list does not count. Media controls and Live Activities stay; swiping down on the left opens system Search.",
             @"三种进度样式只能选择一种。点右上角“刷新”可更新样式，不会中断音频。": @"Choose one of three progress styles. Refresh updates the style without interrupting audio.",
             @"为每首歌从封面提取颜色。关闭某项后，该项使用固定配色。": @"Pick colors from each song's artwork. Disabled items use fixed colors.",
             @"致敬 @LaughingQuoll\n永远怀念最好的开发者。": @"In tribute to @LaughingQuoll\nForever remembering the best developer."
@@ -276,6 +282,12 @@ static void QWritePref(NSString *key, id value) {
     if (url) [UIApplication.sharedApplication openURL:url options:@{} completionHandler:nil];
 }
 
+- (void)openGlassSettings:(id)sender {
+    Class controllerClass = NSClassFromString(@"QGlassListController");
+    UIViewController *controller = [[controllerClass alloc] init];
+    [self.navigationController pushViewController:controller animated:YES];
+}
+
 - (void)openAuthor:(id)sender { [self openURLString:@"https://x.com/Put_Story"]; }
 - (void)openOriginalAuthor:(id)sender { [self openURLString:@"https://x.com/LaughingQuoll"]; }
 - (void)openProject:(id)sender {
@@ -309,5 +321,38 @@ static void QWritePref(NSString *key, id value) {
         _specifiers = nil;
         [self reloadSpecifiers];
     }
+}
+@end
+
+@interface QGlassListController : PSListController
+@end
+
+@implementation QGlassListController
+- (NSArray *)specifiers {
+    if (!_specifiers) {
+        _specifiers = [[self loadSpecifiersFromPlistName:@"Glass" target:self] mutableCopy];
+        BOOL chinese = [[NSLocale.preferredLanguages.firstObject lowercaseString] hasPrefix:@"zh"];
+        self.title = chinese ? @"通知玻璃" : @"Notification Glass";
+        if (!chinese) {
+            NSDictionary *labels = @{@"模糊强度": @"Blur", @"边缘折射": @"Edge refraction",
+                                      @"高光强度": @"Highlights"};
+            for (PSSpecifier *specifier in _specifiers) {
+                NSString *label = labels[specifier.name];
+                if (label) specifier.name = label;
+                NSString *footer = specifier.properties[@"footerText"];
+                if (footer) [specifier setProperty:@"Banners and ordinary Lock Screen notifications share these settings. Refraction uses the iOS 17 backdrop mesh when available."
+                                    forKey:@"footerText"];
+            }
+        }
+    }
+    return _specifiers;
+}
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    PSSpecifier *specifier = [self specifierAtIndexPath:indexPath];
+    id cellClass = specifier.properties[@"cellClass"];
+    if ([cellClass isKindOfClass:NSString.class] && [cellClass isEqualToString:@"QWidthSliderCell"])
+        return 88.0;
+    if (cellClass == NSClassFromString(@"QWidthSliderCell")) return 88.0;
+    return [super tableView:tableView heightForRowAtIndexPath:indexPath];
 }
 @end

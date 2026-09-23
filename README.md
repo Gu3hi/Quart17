@@ -8,7 +8,9 @@ Quart inspired Lock Screen player and notification styling for iOS 17. RootHide 
 - Artwork colors for the player background, text, and progress.
 - Dark notification cards and round application icons.
 - Adjustable Lock Screen notification list size that scales cards, spacing, and group headings together.
-- On the Lock Screen, two downward swipes on the right half clear ordinary notifications while preserving media controls and Live Activities. The left half does not open Search. Clearing can give a light haptic response.
+- Optional desktop banner scaling using the Lock Screen list size setting.
+- Adjustable glass for desktop banners and ordinary Lock Screen notifications, with blur, edge refraction, and highlight sliders. The iOS 17 backdrop mesh is used when available.
+- On the Lock Screen, two downward swipes from empty space on the right half clear ordinary notifications while preserving media controls and Live Activities. Scrolling notification cards does not count. A downward swipe on the left half opens system Search. Clearing can give a light haptic response.
 - Chinese and English settings, with a master switch and live style refresh that keeps audio playing.
 - One corner slider controls the player, background progress fill, artwork, and artwork progress ring. The playback placeholder follows the current system language.
 - Dark mode dims the player background while keeping progress visible. The artwork ring seeks with the same left-to-right drag direction as the background progress style.

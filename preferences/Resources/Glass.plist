@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>items</key><array>
+<dict><key>cell</key><string>PSGroupCell</string><key>label</key><string>通知玻璃</string><key>footerText</key><string>桌面横幅与锁屏普通通知共用这些参数。折射使用 iOS 17 背景网格，具体效果取决于设备支持。</string></dict>
+<dict><key>cell</key><string>PSStaticTextCell</string><key>cellClass</key><string>QWidthSliderCell</string><key>label</key><string>模糊强度</string><key>key</key><string>glassBlur</string><key>default</key><real>8</real><key>min</key><real>0</real><key>max</key><real>18</real><key>unit</key><string>pt</string></dict>
+<dict><key>cell</key><string>PSStaticTextCell</string><key>cellClass</key><string>QWidthSliderCell</string><key>label</key><string>边缘折射</string><key>key</key><string>glassRefraction</string><key>default</key><real>12</real><key>min</key><real>0</real><key>max</key><real>24</real><key>unit</key><string>pt</string></dict>
+<dict><key>cell</key><string>PSStaticTextCell</string><key>cellClass</key><string>QWidthSliderCell</string><key>label</key><string>高光强度</string><key>key</key><string>glassHighlight</string><key>default</key><real>0.5</real><key>min</key><real>0</real><key>max</key><real>1</real></dict>
+</array></dict></plist>
