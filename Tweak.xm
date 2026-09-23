@@ -12,6 +12,11 @@ static NSHashTable<UIView *> *qActivePlatters;
 static NSHashTable<UIView *> *qActiveNotifications;
 static NSHashTable<UIView *> *qActiveLists;
 static NSHashTable<UIView *> *qActiveBanners;
+static UIWindow *qTestBannerWindow;
+static UIView *qTestBannerMaterial;
+static UILabel *qTestBannerTitle;
+static UILabel *qTestBannerMessage;
+static NSTimer *qTestBannerVisibilityTimer;
 static void *QOriginalStyleKey = &QOriginalStyleKey;
 static void *QOwnLayerTransformKey = &QOwnLayerTransformKey;
 static void *QOriginalLayerTransformKey = &QOriginalLayerTransformKey;
@@ -25,6 +30,10 @@ static void *QBannerGlassSheenKey = &QBannerGlassSheenKey;
 static void *QBannerGlassBackdropKey = &QBannerGlassBackdropKey;
 static void *QBannerGlassBlurKey = &QBannerGlassBlurKey;
 static void *QBannerGlassMeshKey = &QBannerGlassMeshKey;
+static void *QBannerGlassStyleKey = &QBannerGlassStyleKey;
+static void *QBannerGlassCompatibilityKey = &QBannerGlassCompatibilityKey;
+static void *QLockGlassShadowHiddenKey = &QLockGlassShadowHiddenKey;
+static void *QLockOriginalInterfaceStyleKey = &QLockOriginalInterfaceStyleKey;
 static __weak id qMasterList;
 static CFAbsoluteTime qLastRightSwipe;
 static void *QSearchPanInstalledKey = &QSearchPanInstalledKey;
@@ -39,6 +48,9 @@ static void QApplyListScaling(UIView *list);
 static void QScheduleListScaling(UIView *list);
 static void QClearOwnLayerTransform(UIView *list);
 static void QApplyBannerScaling(UIView *banner);
+static void QRefreshTestBanner(void);
+static void QShowTestBanner(void);
+static void QHideTestBanner(void);
 
 @interface NCNotificationShortLookViewController : UIViewController
 - (UIView *)viewForPreview;
@@ -92,6 +104,7 @@ static void QChanged(CFNotificationCenterRef center, void *observer, CFStringRef
         for (UIView *notification in qActiveNotifications.allObjects) QStyle(notification);
         for (UIView *list in qActiveLists.allObjects) QScheduleListScaling(list);
         for (UIView *banner in qActiveBanners.allObjects) QApplyBannerScaling(banner);
+        QRefreshTestBanner();
     });
 }
 
@@ -234,6 +247,33 @@ static void QRestoreStyle(UIView *root) {
     }
 }
 
+static UIColor *QAdaptiveGlassTextColor(void) {
+    static UIColor *color;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        color = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+            return traits.userInterfaceStyle == UIUserInterfaceStyleDark
+                ? UIColor.whiteColor : UIColor.blackColor;
+        }];
+    });
+    return color;
+}
+
+static void QSetLockNotificationAppearance(UIView *root, UIUserInterfaceStyle style) {
+    NSNumber *original = objc_getAssociatedObject(root, QLockOriginalInterfaceStyleKey);
+    if (style != UIUserInterfaceStyleUnspecified) {
+        if (!original)
+            objc_setAssociatedObject(root, QLockOriginalInterfaceStyleKey,
+                                     @(root.overrideUserInterfaceStyle), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (root.overrideUserInterfaceStyle != style)
+            root.overrideUserInterfaceStyle = style;
+    } else if (original) {
+        root.overrideUserInterfaceStyle = (UIUserInterfaceStyle)original.integerValue;
+        objc_setAssociatedObject(root, QLockOriginalInterfaceStyleKey, nil,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
 // CAMutableMeshTransform uses these C layouts on arm64, as in Burger Swift's
 // iOS 17 glass surface. The mesh displaces backdrop sampling toward the
 // middle of the rounded edge while leaving the card content untouched.
@@ -328,6 +368,23 @@ static void QUpdateGlassRefraction(CALayer *backdrop, CGSize size, CGFloat radiu
 
 // Keep the glass behind Apple's content and actions. Use the same surface for
 // desktop banners and ordinary Lock Screen notifications, never Live Activities.
+static void QSetLockGlassShadowHidden(UIView *material, BOOL hidden) {
+    for (UIView *sibling in material.superview.subviews) {
+        if (![NSStringFromClass(sibling.class) containsString:@"MTShadowView"]) continue;
+        NSNumber *original = objc_getAssociatedObject(sibling, QLockGlassShadowHiddenKey);
+        if (hidden) {
+            if (!original)
+                objc_setAssociatedObject(sibling, QLockGlassShadowHiddenKey, @(sibling.hidden),
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            sibling.hidden = YES;
+        } else if (original) {
+            sibling.hidden = original.boolValue;
+            objc_setAssociatedObject(sibling, QLockGlassShadowHiddenKey, nil,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+    }
+}
+
 static void QApplyBannerGlass(UIView *root, UIView *material) {
     if (!material) return;
     UIVisualEffectView *glass = objc_getAssociatedObject(material, QBannerGlassKey);
@@ -337,10 +394,23 @@ static void QApplyBannerGlass(UIView *root, UIView *material) {
     if (!enabled || !material.superview) {
         [glass removeFromSuperview];
         objc_setAssociatedObject(material, QBannerGlassKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        QSetLockGlassShadowHidden(material, NO);
         return;
+    }
+    BOOL lockNotification = QIsLockScreenNotification(root);
+    QSetLockGlassShadowHidden(material, lockNotification);
+    // Both banner locations use the same live backdrop renderer. The lock
+    // cell's appearance is fixed separately so its folded material is dark.
+    BOOL compatibleLockGlass = NO;
+    if (glass && [objc_getAssociatedObject(glass, QBannerGlassCompatibilityKey) boolValue] != compatibleLockGlass) {
+        [glass removeFromSuperview];
+        objc_setAssociatedObject(material, QBannerGlassKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        glass = nil;
     }
     if (!glass) {
         glass = [[UIVisualEffectView alloc] initWithEffect:nil];
+        objc_setAssociatedObject(glass, QBannerGlassCompatibilityKey, @(compatibleLockGlass),
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         glass.userInteractionEnabled = NO;
         glass.clipsToBounds = YES;
         glass.layer.cornerCurve = kCACornerCurveContinuous;
@@ -350,7 +420,8 @@ static void QApplyBannerGlass(UIView *root, UIView *material) {
         Class backdropClass = NSClassFromString(@"CABackdropLayer");
         Class filterClass = NSClassFromString(@"CAFilter");
         SEL filterSelector = NSSelectorFromString(@"filterWithName:");
-        if (backdropClass && filterClass && [filterClass respondsToSelector:filterSelector]) {
+        if (!compatibleLockGlass && backdropClass && filterClass &&
+            [filterClass respondsToSelector:filterSelector]) {
             @try {
                 CALayer *backdrop = ((id (*)(id, SEL))objc_msgSend)(backdropClass, @selector(layer));
                 id blur = ((id (*)(id, SEL, id))objc_msgSend)(filterClass, filterSelector, @"gaussianBlur");
@@ -375,30 +446,54 @@ static void QApplyBannerGlass(UIView *root, UIView *material) {
         objc_setAssociatedObject(glass, QBannerGlassSheenKey, sheen, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(material, QBannerGlassKey, glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    BOOL dark = root.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
-    UIBlurEffectStyle style = dark ? UIBlurEffectStyleSystemUltraThinMaterialDark :
-                                     UIBlurEffectStyleSystemUltraThinMaterialLight;
-    if (!objc_getAssociatedObject(glass, QBannerGlassBackdropKey) &&
-        (!glass.effect || glass.overrideUserInterfaceStyle != (dark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight))) {
-        glass.overrideUserInterfaceStyle = dark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
-        glass.effect = [UIBlurEffect effectWithStyle:style];
+    UITraitCollection *systemTraits = lockNotification ? root.window.traitCollection : root.traitCollection;
+    BOOL systemDark = systemTraits.userInterfaceStyle == UIUserInterfaceStyleDark;
+    // The Lock Screen cell must stay in dark appearance to avoid black
+    // collapsed-stack materials in light system appearance. Match the banner's
+    // glass treatment while keeping that independent appearance choice.
+    BOOL dark = lockNotification || systemDark;
+    if (compatibleLockGlass) {
+        CALayer *oldBackdrop = objc_getAssociatedObject(glass, QBannerGlassBackdropKey);
+        [oldBackdrop removeFromSuperlayer];
+        objc_setAssociatedObject(glass, QBannerGlassBackdropKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(glass, QBannerGlassBlurKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    glass.frame = material.frame;
-    glass.autoresizingMask = material.autoresizingMask;
-    CALayer *backdrop = objc_getAssociatedObject(glass, QBannerGlassBackdropKey);
-    backdrop.frame = glass.bounds;
     CGFloat blurRadius = [qSettings[@"glassBlur"] doubleValue];
     CGFloat refraction = [qSettings[@"glassRefraction"] doubleValue];
     CGFloat highlight = [qSettings[@"glassHighlight"] doubleValue];
     blurRadius = isfinite(blurRadius) ? MAX(0, MIN(18, blurRadius)) : 8;
     refraction = isfinite(refraction) ? MAX(0, MIN(24, refraction)) : 12;
     highlight = isfinite(highlight) ? MAX(0, MIN(1, highlight)) : 0.5;
+    // The same blur radius and mesh displacement drive both locations.
+    UIBlurEffectStyle style = dark ? UIBlurEffectStyleSystemUltraThinMaterialDark :
+                                     UIBlurEffectStyleSystemUltraThinMaterialLight;
+    if (compatibleLockGlass && blurRadius > 8)
+        style = dark ? UIBlurEffectStyleSystemThinMaterialDark : UIBlurEffectStyleSystemThinMaterialLight;
+    if (compatibleLockGlass && blurRadius >= 14)
+        style = dark ? UIBlurEffectStyleSystemMaterialDark : UIBlurEffectStyleSystemMaterialLight;
+    if (compatibleLockGlass && blurRadius >= 17)
+        style = dark ? UIBlurEffectStyleSystemThickMaterialDark : UIBlurEffectStyleSystemThickMaterialLight;
+    NSNumber *styleNumber = blurRadius < 0.5 && compatibleLockGlass ? @(-1) : @(style);
+    NSNumber *oldStyle = objc_getAssociatedObject(glass, QBannerGlassStyleKey);
+    if (!objc_getAssociatedObject(glass, QBannerGlassBackdropKey) &&
+        (![oldStyle isEqualToNumber:styleNumber] ||
+         glass.overrideUserInterfaceStyle != (dark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight))) {
+        glass.overrideUserInterfaceStyle = dark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
+        glass.effect = styleNumber.integerValue < 0 ? nil : [UIBlurEffect effectWithStyle:style];
+        objc_setAssociatedObject(glass, QBannerGlassStyleKey, styleNumber, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    glass.alpha = 1;
+    glass.contentView.backgroundColor = nil;
+    glass.frame = material.frame;
+    glass.autoresizingMask = material.autoresizingMask;
+    CALayer *backdrop = objc_getAssociatedObject(glass, QBannerGlassBackdropKey);
+    backdrop.frame = glass.bounds;
     id blurFilter = objc_getAssociatedObject(glass, QBannerGlassBlurKey);
     if (blurFilter) [blurFilter setValue:@(blurRadius) forKey:@"inputRadius"];
     QUpdateGlassRefraction(backdrop, glass.bounds.size, glass.layer.cornerRadius,
                            refraction, glass);
     glass.layer.cornerRadius = material.layer.cornerRadius;
-    glass.layer.borderWidth = 0.75;
+    glass.layer.borderWidth = compatibleLockGlass ? 0 : 0.75;
     // A white rim disappears against bright apps. Use a faint dark outline in
     // light mode while retaining the specular top edge inside the material.
     glass.layer.borderColor = (dark ? [UIColor colorWithWhite:1 alpha:0.26] :
@@ -411,13 +506,146 @@ static void QApplyBannerGlass(UIView *root, UIView *material) {
                         : @[(id)[UIColor colorWithWhite:1 alpha:0.52 * highlight].CGColor,
                              (id)[UIColor colorWithWhite:1 alpha:0.05 * highlight].CGColor,
                              (id)[UIColor colorWithWhite:0 alpha:0.08].CGColor];
+    sheen.opacity = 1;
     if (glass.superview != material.superview)
         [material.superview insertSubview:glass aboveSubview:material];
     material.hidden = YES;
 }
 
+// A persistent SpringBoard preview uses the exact desktop glass renderer.
+// It is deliberately separate from BulletinBoard, so testing never adds a
+// real notification to Notification Center or changes app alert settings.
+static void QRefreshTestBanner(void) {
+    if (!qTestBannerWindow || !qTestBannerMaterial) return;
+    UIView *root = qTestBannerWindow.rootViewController.view;
+    CGFloat radius = MAX(8, MIN(40, [qSettings[@"radius"] doubleValue]));
+    root.layer.cornerRadius = radius;
+    root.layer.cornerCurve = kCACornerCurveContinuous;
+    root.clipsToBounds = YES;
+    qTestBannerMaterial.frame = root.bounds;
+    qTestBannerMaterial.layer.cornerRadius = radius;
+    qTestBannerMaterial.layer.cornerCurve = kCACornerCurveContinuous;
+    qTestBannerMaterial.clipsToBounds = YES;
+    UIVisualEffectView *previousGlass = objc_getAssociatedObject(qTestBannerMaterial, QBannerGlassKey);
+    [previousGlass removeFromSuperview];
+    objc_setAssociatedObject(qTestBannerMaterial, QBannerGlassKey, nil,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    qTestBannerMaterial.hidden = NO;
+    QApplyBannerGlass(root, qTestBannerMaterial);
+    BOOL dark = root.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
+    qTestBannerTitle.textColor = dark ? UIColor.whiteColor : UIColor.blackColor;
+    qTestBannerMessage.textColor = dark ? UIColor.whiteColor : UIColor.blackColor;
+}
+
+static void QHideTestBanner(void) {
+    [qTestBannerVisibilityTimer invalidate];
+    qTestBannerVisibilityTimer = nil;
+    qTestBannerWindow.hidden = YES;
+    qTestBannerWindow.rootViewController = nil;
+    qTestBannerWindow = nil;
+    qTestBannerMaterial = nil;
+    qTestBannerTitle = nil;
+    qTestBannerMessage = nil;
+}
+
+static void QShowTestBanner(void) {
+    QHideTestBanner();
+    UIWindowScene *scene = nil;
+    for (UIScene *candidate in UIApplication.sharedApplication.connectedScenes) {
+        if ([candidate isKindOfClass:UIWindowScene.class] &&
+            candidate.activationState == UISceneActivationStateForegroundActive) {
+            scene = (UIWindowScene *)candidate;
+            break;
+        }
+    }
+    CGRect screen = UIScreen.mainScreen.bounds;
+    UIWindow *window = scene ? [[UIWindow alloc] initWithWindowScene:scene]
+                             : [[UIWindow alloc] initWithFrame:screen];
+    window.frame = CGRectMake(14, MAX(54, screen.size.height * 0.065), screen.size.width - 28, 82);
+    window.windowLevel = UIWindowLevelAlert + 2;
+    window.backgroundColor = UIColor.clearColor;
+    UIViewController *controller = [UIViewController new];
+    UIView *root = [[UIView alloc] initWithFrame:CGRectMake(0, 0, window.bounds.size.width, 82)];
+    root.backgroundColor = UIColor.clearColor;
+    controller.view = root;
+    window.rootViewController = controller;
+
+    UIVisualEffectView *material = [[UIVisualEffectView alloc] initWithEffect:
+        [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial]];
+    material.frame = root.bounds;
+    material.userInteractionEnabled = NO;
+    [root addSubview:material];
+    qTestBannerMaterial = material;
+
+    UIView *icon = [[UIView alloc] initWithFrame:CGRectMake(16, 17, 48, 48)];
+    icon.backgroundColor = [UIColor colorWithRed:0.78 green:0.23 blue:0.17 alpha:1];
+    icon.layer.cornerRadius = 24;
+    [root addSubview:icon];
+    UIImageView *symbol = [[UIImageView alloc] initWithImage:
+        [UIImage systemImageNamed:@"bell.fill"]];
+    symbol.tintColor = UIColor.whiteColor;
+    symbol.contentMode = UIViewContentModeScaleAspectFit;
+    symbol.frame = CGRectMake(13, 13, 22, 22);
+    [icon addSubview:symbol];
+
+    CGFloat textWidth = MAX(100, root.bounds.size.width - 130);
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(78, 17, textWidth, 23)];
+    title.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    title.text = @"Quart17";
+    [root addSubview:title];
+    qTestBannerTitle = title;
+    UILabel *message = [[UILabel alloc] initWithFrame:CGRectMake(78, 40, textWidth, 24)];
+    message.font = [UIFont systemFontOfSize:14];
+    BOOL chinese = [[NSLocale.preferredLanguages.firstObject lowercaseString] hasPrefix:@"zh"];
+    message.text = chinese ? @"常驻测试通知 · 调节玻璃效果" : @"Persistent test · adjust the glass";
+    message.lineBreakMode = NSLineBreakByTruncatingTail;
+    [root addSubview:message];
+    qTestBannerMessage = message;
+
+    UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
+    close.frame = CGRectMake(root.bounds.size.width - 42, 23, 32, 32);
+    [close setImage:[UIImage systemImageNamed:@"xmark.circle.fill"] forState:UIControlStateNormal];
+    close.tintColor = UIColor.secondaryLabelColor;
+    [close addTarget:controller action:@selector(q_quartHideTestBanner) forControlEvents:UIControlEventTouchUpInside];
+    [root addSubview:close];
+
+    qTestBannerWindow = window;
+    window.hidden = QIsLockScreenVisible();
+    QRefreshTestBanner();
+    qTestBannerVisibilityTimer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(__unused NSTimer *timer) {
+        qTestBannerWindow.hidden = QIsLockScreenVisible();
+    }];
+}
+
+@interface UIViewController (QuartTestBanner)
+- (void)q_quartHideTestBanner;
+@end
+@implementation UIViewController (QuartTestBanner)
+- (void)q_quartHideTestBanner { QHideTestBanner(); }
+@end
+
+static void QTestBannerChanged(CFNotificationCenterRef center, void *observer, CFStringRef name,
+                               const void *object, CFDictionaryRef userInfo) {
+    BOOL show = CFEqual(name, CFSTR("com.gushi.quart17/showtestnotification"));
+    dispatch_async(dispatch_get_main_queue(), ^{ if (show) QShowTestBanner(); else QHideTestBanner(); });
+}
+
 static void QStyle(UIView *root) {
     if (!root) return;
+    BOOL lockNotification = QIsLockScreenNotification(root);
+    BOOL stylingEnabled = [qSettings[@"masterEnabled"] boolValue] &&
+                          [qSettings[@"enabled"] boolValue];
+    // Keep the entire folded cell dark, including its outer dimming material.
+    UIView *appearanceRoot = root;
+    for (UIView *ancestor = root.superview; ancestor && ![ancestor isKindOfClass:UIWindow.class];
+         ancestor = ancestor.superview) {
+        if ([NSStringFromClass(ancestor.class) isEqualToString:@"NCNotificationListCell"]) {
+            appearanceRoot = ancestor;
+            break;
+        }
+    }
+    QSetLockNotificationAppearance(appearanceRoot,
+        stylingEnabled && lockNotification ? UIUserInterfaceStyleDark : UIUserInterfaceStyleUnspecified);
     [qActiveNotifications addObject:root];
     QRestoreStyle(root);
     UIView *material = QFind(root, @"MTMaterialView");
@@ -436,7 +664,7 @@ static void QStyle(UIView *root) {
         material.layer.cornerRadius = radius;
         material.layer.cornerCurve = kCACornerCurveContinuous;
         material.clipsToBounds = YES;
-        if ([qSettings[@"darkCards"] boolValue]) {
+        if ([qSettings[@"darkCards"] boolValue] || lockNotification) {
             material.backgroundColor = [UIColor colorWithWhite:0.055 alpha:0.82];
         }
         QApplyBannerGlass(root, material);
@@ -451,7 +679,14 @@ static void QStyle(UIView *root) {
         if ([view isKindOfClass:UILabel.class]) {
             UILabel *label = (UILabel *)view;
             QRememberStyle(label);
-            if ([qSettings[@"darkCards"] boolValue]) label.textColor = UIColor.whiteColor;
+            // The glass replaces Apple's material, so its labels must follow
+            // the current appearance even for notifications already on screen.
+            if ([qSettings[@"darkCards"] boolValue] || lockNotification) {
+                label.textColor = UIColor.whiteColor;
+            } else if ([qSettings[@"glassBanners"] boolValue] &&
+                       (QIsLockScreenNotification(root) || QIsDesktopBanner(root))) {
+                label.textColor = QAdaptiveGlassTextColor();
+            }
         }
         NSString *name = NSStringFromClass(view.class);
         BOOL iconClass = [name containsString:@"IconView"] || [name isEqualToString:@"NCBadgedIconView"];
@@ -477,6 +712,16 @@ static void *QSpringBoardPlayerKey = &QSpringBoardPlayerKey;
 
 %group QNotifications
 %hook NCNotificationShortLookViewController
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    %orig;
+    if (previousTraitCollection.userInterfaceStyle == self.traitCollection.userInterfaceStyle)
+        return;
+    UIView *view = self.view;
+    UIView *preview = [self respondsToSelector:@selector(viewForPreview)]
+        ? ((id (*)(id, SEL))objc_msgSend)(self, @selector(viewForPreview)) : nil;
+    QStyle(preview ?: view);
+}
 
 - (void)viewDidLayoutSubviews {
     %orig;
@@ -942,6 +1187,12 @@ static void QScheduleListScaling(UIView *list) {
         if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"]) {
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
                                             QOpenPlayingApp, CFSTR("com.gushi.quart17/openplayingapp"),
+                                            NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+            CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+                                            QTestBannerChanged, CFSTR("com.gushi.quart17/showtestnotification"),
+                                            NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+            CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+                                            QTestBannerChanged, CFSTR("com.gushi.quart17/hidetestnotification"),
                                             NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         }
         if (objc_getClass("NCNotificationShortLookViewController")) %init(QNotifications);

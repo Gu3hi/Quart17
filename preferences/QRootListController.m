@@ -33,6 +33,7 @@ static void QWritePref(NSString *key, id value) {
 @property (nonatomic, strong) UILabel *qTitleLabel;
 @property (nonatomic, strong) UILabel *qValueLabel;
 @property (nonatomic, strong) UISlider *qSlider;
+@property (nonatomic, assign) CFAbsoluteTime qLastLiveWrite;
 @end
 
 @implementation QWidthSliderCell
@@ -118,6 +119,15 @@ static void QWritePref(NSString *key, id value) {
     double v = slider.value;
     PSSpecifier *specifier = self.specifier;
     self.qValueLabel.text = [self percentForValue:v specifier:specifier];
+    NSString *key = specifier.properties[@"key"];
+    if ([key isEqualToString:@"glassBlur"] || [key isEqualToString:@"glassRefraction"] ||
+        [key isEqualToString:@"glassHighlight"]) {
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (now - self.qLastLiveWrite >= 0.08) {
+            self.qLastLiveWrite = now;
+            QWritePref(key, @(v));
+        }
+    }
 }
 
 - (void)sliderCommitted:(UISlider *)slider {
@@ -207,6 +217,7 @@ static void QWritePref(NSString *key, id value) {
             @"缩放桌面横幅": @"Scale notification banners",
             @"横幅与锁屏玻璃": @"Banner & Lock Screen glass",
             @"玻璃参数": @"Glass appearance",
+            @"玻璃效果": @"Glass effect",
             @"通知外观": @"Notifications",
             @"启用通知样式": @"Enable notification style", @"深色卡片": @"Dark cards",
             @"圆形应用图标": @"Round app icons",
@@ -229,7 +240,8 @@ static void QWritePref(NSString *key, id value) {
         NSDictionary *englishFooters = @{
             @"关闭总开关会停用通知与锁屏播放器样式，并收起以下设置。": @"Turn off to disable both styles and collapse the options below.",
             @"锁屏列表大小控制锁屏通知；开启桌面横幅缩放后，弹出的横幅使用相同的大小。": @"Lock Screen list size controls Lock Screen notifications. Enable banner scaling to use the same size for incoming banners.",
-            @"只控制通知卡片，不影响列表大小和锁屏播放器。": @"Only affects notification cards, not list size or the player.",
+            @"调整通知卡片的文字和图标；锁屏通知固定使用深色外观以避免折叠黑块。": @"Adjust notification text and icons. Lock Screen cards keep a dark appearance to prevent black folded stacks.",
+            @"进入玻璃参数可一边拖动滑块，一边查看常驻测试横幅。": @"Open Glass appearance to adjust the sliders while viewing a persistent test banner.",
             @"从右半屏空白处连续两次下滑清除普通通知；滚动列表不会计入。保留音乐控件和实时活动；左半屏下滑打开系统搜索。": @"Swipe down twice from empty space on the right half to clear ordinary notifications. Scrolling the list does not count. Media controls and Live Activities stay; swiping down on the left opens system Search.",
             @"三种进度样式只能选择一种。点右上角“刷新”可更新样式，不会中断音频。": @"Choose one of three progress styles. Refresh updates the style without interrupting audio.",
             @"为每首歌从封面提取颜色。关闭某项后，该项使用固定配色。": @"Pick colors from each song's artwork. Disabled items use fixed colors.",
@@ -335,17 +347,33 @@ static void QWritePref(NSString *key, id value) {
         self.title = chinese ? @"通知玻璃" : @"Notification Glass";
         if (!chinese) {
             NSDictionary *labels = @{@"模糊强度": @"Blur", @"边缘折射": @"Edge refraction",
-                                      @"高光强度": @"Highlights"};
+                                      @"高光强度": @"Highlights",
+                                      @"显示常驻测试横幅": @"Show persistent test banner",
+                                      @"移除测试横幅": @"Remove test banner"};
             for (PSSpecifier *specifier in _specifiers) {
                 NSString *label = labels[specifier.name];
                 if (label) specifier.name = label;
                 NSString *footer = specifier.properties[@"footerText"];
-                if (footer) [specifier setProperty:@"Banners and ordinary Lock Screen notifications share these settings. Refraction uses the iOS 17 backdrop mesh when available."
-                                    forKey:@"footerText"];
+                if ([footer containsString:@"桌面横幅与锁屏通知共用"])
+                    [specifier setProperty:@"Desktop banners and Lock Screen cards share these three controls. Drag a slider to update the persistent test banner immediately. Lock Screen cards keep a dark appearance."
+                                  forKey:@"footerText"];
+                else if (footer)
+                    [specifier setProperty:@"The test banner stays on screen until you close it here or on the banner. It does not enter Notification Center."
+                                  forKey:@"footerText"];
             }
         }
     }
     return _specifiers;
+}
+
+- (void)showTestNotification:(id)sender {
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+        CFSTR("com.gushi.quart17/showtestnotification"), NULL, NULL, YES);
+}
+
+- (void)hideTestNotification:(id)sender {
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+        CFSTR("com.gushi.quart17/hidetestnotification"), NULL, NULL, YES);
 }
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
     PSSpecifier *specifier = [self specifierAtIndexPath:indexPath];
@@ -354,5 +382,11 @@ static void QWritePref(NSString *key, id value) {
         return 88.0;
     if (cellClass == NSClassFromString(@"QWidthSliderCell")) return 88.0;
     return [super tableView:tableView heightForRowAtIndexPath:indexPath];
+}
+- (id)readPreferenceValue:(PSSpecifier *)specifier {
+    return QReadPref(specifier.properties[@"key"], specifier.properties[@"default"]);
+}
+- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
+    QWritePref(specifier.properties[@"key"], value);
 }
 @end
