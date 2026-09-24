@@ -5,6 +5,8 @@
 #import <stdlib.h>
 #import <notify.h>
 #import <math.h>
+#include <algorithm>
+#include <vector>
 #import "QPlayerView.h"
 
 static NSString *const QPrefs = @"com.gushi.quart17";
@@ -349,56 +351,147 @@ static CGFloat QGlassSDF(CGFloat x, CGFloat y, CGSize size, CGFloat radius) {
     return hypot(MAX(qx, 0), MAX(qy, 0)) + MIN(MAX(qx, qy), 0) - radius;
 }
 
+// Match Burger Swift's edge displacement curve without changing the setting's
+// meaning: the refraction slider still supplies the displacement in points.
+static CGFloat QGlassBezier(CGFloat value) {
+    const CGFloat x1 = 0.816137566137566, y1 = 0.20502645502645533;
+    const CGFloat x2 = 0.5806878306878306, y2 = 0.873015873015873;
+    CGFloat t = MAX(0, MIN(1, value));
+    for (int i = 0; i < 4; i++) {
+        CGFloat inverse = 1 - t;
+        CGFloat x = 3 * inverse * inverse * t * x1 + 3 * inverse * t * t * x2 + t * t * t;
+        CGFloat slope = 3 * inverse * inverse * x1 + 6 * inverse * t * (x2 - x1) + 3 * t * t * (1 - x2);
+        if (fabs(slope) < 0.0001) break;
+        t = MAX(0, MIN(1, t - (x - value) / slope));
+    }
+    CGFloat inverse = 1 - t;
+    CGFloat result = 3 * inverse * inverse * t * y1 + 3 * inverse * t * t * y2 + t * t * t;
+    return result >= 0.997 ? 1 : result;
+}
+
 extern "C" void QUpdateGlassRefraction(CALayer *backdrop, CGSize size, CGFloat radius,
                                         CGFloat magnitude, UIVisualEffectView *glass) {
     Class meshClass = NSClassFromString(@"CAMutableMeshTransform");
     SEL create = NSSelectorFromString(@"meshTransformWithVertexCount:vertices:faceCount:faces:depthNormalization:");
     if (!backdrop || !meshClass || ![meshClass respondsToSelector:create] ||
         size.width < 30 || size.height < 30) return;
-    NSString *signature = [NSString stringWithFormat:@"%.1f:%.1f:%.1f:%.1f",
+    NSString *signature = [NSString stringWithFormat:@"rounded-v2:%.1f:%.1f:%.1f:%.1f",
                            size.width, size.height, radius, magnitude];
     if ([signature isEqual:objc_getAssociatedObject(glass, QBannerGlassMeshKey)]) return;
-    NSArray<NSNumber *> *xs = QGlassGrid(size.width);
-    NSArray<NSNumber *> *ys = QGlassGrid(size.height);
-    NSUInteger columns = xs.count, rows = ys.count;
-    NSUInteger vertexCount = columns * rows;
-    NSUInteger faceCount = (columns - 1) * (rows - 1);
-    QGlassVertex *vertices = (QGlassVertex *)calloc(vertexCount, sizeof(QGlassVertex));
-    QGlassFace *faces = (QGlassFace *)calloc(faceCount, sizeof(QGlassFace));
-    if (!vertices || !faces) { free(vertices); free(faces); return; }
-    CGFloat edgeDistance = 13;
-    for (NSUInteger row = 0; row < rows; row++) {
-        CGFloat y = ys[row].doubleValue;
-        for (NSUInteger column = 0; column < columns; column++) {
-            CGFloat x = xs[column].doubleValue;
-            CGFloat distance = -QGlassSDF(x, y, size, radius);
-            CGFloat weight = MAX(0, MIN(1, 1 - distance / edgeDistance));
-            weight *= weight * (3 - 2 * weight);
-            CGFloat nx = QGlassSDF(x + 0.5, y, size, radius) - QGlassSDF(x - 0.5, y, size, radius);
-            CGFloat ny = QGlassSDF(x, y + 0.5, size, radius) - QGlassSDF(x, y - 0.5, size, radius);
-            CGFloat norm = hypot(nx, ny);
-            if (norm > 0) { nx /= norm; ny /= norm; }
-            NSUInteger index = row * columns + column;
-            vertices[index].from = CGPointMake(MAX(0, MIN(1, (x - nx * weight * magnitude) / size.width)),
-                                                MAX(0, MIN(1, (y - ny * weight * magnitude) / size.height)));
-            vertices[index].to = (QGlassPoint3D){x / size.width, y / size.height, 0};
+    CGFloat r = MAX(0, MIN(radius, MIN(size.width, size.height) / 2));
+    CGFloat edgeDistance = MIN(12, MAX(r, 1));
+    std::vector<QGlassVertex> vertices;
+    std::vector<QGlassFace> faces;
+    auto addVertex = [&](CGFloat x, CGFloat y, CGFloat depth = 0) -> uint32_t {
+        CGFloat px = x - size.width / 2, py = y - size.height / 2;
+        CGFloat qx = fabs(px) - size.width / 2 + r;
+        CGFloat qy = fabs(py) - size.height / 2 + r;
+        CGFloat nx = 0, ny = 0;
+        if (qx > 0 && qy > 0) {
+            CGFloat length = hypot(qx, qy);
+            if (length > 0) { nx = qx / length; ny = qy / length; }
+        } else if (qx > qy) nx = 1;
+        else ny = 1;
+        if (px < 0) nx = -nx;
+        if (py < 0) ny = -ny;
+        CGFloat distance = MAX(0, -QGlassSDF(x, y, size, r));
+        CGFloat weight = QGlassBezier(MAX(0, MIN(1, 1 - distance / edgeDistance)));
+        CGFloat edgeBand = MIN(2, r);
+        if (edgeBand > 0) {
+            CGFloat boost = MAX(0, MIN(1, (edgeBand - distance) / edgeBand));
+            weight *= 1 + 0.5 * boost * boost * (3 - 2 * boost);
         }
-    }
-    for (NSUInteger row = 0; row + 1 < rows; row++) {
-        for (NSUInteger column = 0; column + 1 < columns; column++) {
-            QGlassFace *face = &faces[row * (columns - 1) + column];
-            uint32_t top = (uint32_t)(row * columns + column);
-            face->indices[0] = top;
-            face->indices[1] = top + 1;
-            face->indices[2] = top + (uint32_t)columns + 1;
-            face->indices[3] = top + (uint32_t)columns;
+        QGlassVertex vertex = {};
+        vertex.from = CGPointMake(MAX(0, MIN(1, (x - nx * weight * magnitude) / size.width)),
+                                  MAX(0, MIN(1, (y - ny * weight * magnitude) / size.height)));
+        vertex.to = (QGlassPoint3D){x / size.width, y / size.height, depth};
+        vertices.push_back(vertex);
+        return (uint32_t)(vertices.size() - 1);
+    };
+    auto addFace = [&](uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
+        QGlassFace face = {};
+        face.indices[0] = a; face.indices[1] = b;
+        face.indices[2] = c; face.indices[3] = d;
+        faces.push_back(face);
+    };
+    auto addGrid = [&](const std::vector<CGFloat> &xs, const std::vector<CGFloat> &ys) {
+        if (xs.size() < 2 || ys.size() < 2 ||
+            xs.back() - xs.front() < 0.01 || ys.back() - ys.front() < 0.01) return;
+        std::vector<uint32_t> indices;
+        for (CGFloat y : ys) for (CGFloat x : xs) indices.push_back(addVertex(x, y));
+        for (size_t row = 0; row + 1 < ys.size(); row++) {
+            for (size_t column = 0; column + 1 < xs.size(); column++) {
+                size_t top = row * xs.size() + column;
+                addFace(indices[top], indices[top + 1],
+                        indices[top + xs.size() + 1], indices[top + xs.size()]);
+            }
         }
+    };
+    if (r < 1) {
+        NSArray<NSNumber *> *oldX = QGlassGrid(size.width), *oldY = QGlassGrid(size.height);
+        std::vector<CGFloat> xs, ys;
+        for (NSNumber *number in oldX) xs.push_back(number.doubleValue);
+        for (NSNumber *number in oldY) ys.push_back(number.doubleValue);
+        addGrid(xs, ys);
+    } else {
+        // Straight strips use radial samples that meet the quarter-circle rings
+        // at the same coordinates, keeping the mesh continuous at each corner.
+        std::vector<CGFloat> depths = {0};
+        for (int i = 1; i < 12; i++) depths.push_back(r * i / 12);
+        depths.push_back(r);
+        if (r > 2) depths.push_back(2);
+        std::sort(depths.begin(), depths.end());
+        depths.erase(std::unique(depths.begin(), depths.end(), [](CGFloat a, CGFloat b) {
+            return fabs(a - b) < 0.01;
+        }), depths.end());
+        std::vector<CGFloat> topY, bottomY, leftX, rightX, radii;
+        for (CGFloat depth : depths) {
+            topY.push_back(depth);
+            bottomY.push_back(size.height - r + depth);
+            leftX.push_back(depth);
+            rightX.push_back(size.width - r + depth);
+            if (depth < r - 0.01) radii.push_back(r - depth);
+        }
+        std::vector<CGFloat> middleX, middleY;
+        for (int i = 0; i <= 7; i++) middleX.push_back(r + (size.width - 2 * r) * i / 7);
+        for (int i = 0; i <= 7; i++) middleY.push_back(r + (size.height - 2 * r) * i / 7);
+        addGrid(middleX, topY);
+        addGrid(middleX, bottomY);
+        addGrid(leftX, middleY);
+        addGrid(rightX, middleY);
+        addGrid(middleX, middleY);
+        auto addCorner = [&](CGFloat cx, CGFloat cy, CGFloat start, CGFloat end) {
+            std::vector<std::vector<uint32_t>> rings;
+            for (CGFloat ringRadius : radii) {
+                std::vector<uint32_t> ring;
+                for (int i = 0; i <= 12; i++) {
+                    CGFloat angle = start + (end - start) * i / 12;
+                    ring.push_back(addVertex(cx + ringRadius * cos(angle),
+                                             cy + ringRadius * sin(angle)));
+                }
+                rings.push_back(std::move(ring));
+            }
+            for (size_t row = 0; row + 1 < rings.size(); row++)
+                for (size_t column = 0; column < 12; column++)
+                    addFace(rings[row][column], rings[row][column + 1],
+                            rings[row + 1][column + 1], rings[row + 1][column]);
+            uint32_t center = addVertex(cx, cy, -0.02);
+            const std::vector<uint32_t> &inner = rings.back();
+            for (int i = 0; i < 12; i += 2)
+                addFace(center, inner[i], inner[i + 1], inner[i + 2]);
+        };
+        addCorner(r, r, M_PI, 1.5 * M_PI);
+        addCorner(size.width - r, r, 1.5 * M_PI, 2 * M_PI);
+        addCorner(size.width - r, size.height - r, 0, 0.5 * M_PI);
+        addCorner(r, size.height - r, 0.5 * M_PI, M_PI);
     }
+    if (vertices.empty() || faces.empty()) return;
     @try {
         IMP imp = [meshClass methodForSelector:create];
         id (*makeMesh)(id, SEL, NSUInteger, const void *, NSUInteger, const void *, id) =
             (id (*)(id, SEL, NSUInteger, const void *, NSUInteger, const void *, id))imp;
-        id mesh = makeMesh(meshClass, create, vertexCount, vertices, faceCount, faces, @"none");
+        id mesh = makeMesh(meshClass, create, vertices.size(), vertices.data(),
+                           faces.size(), faces.data(), @"none");
         if (mesh) {
             SEL steps = NSSelectorFromString(@"setSubdivisionSteps:");
             if ([mesh respondsToSelector:steps])
@@ -410,8 +503,6 @@ extern "C" void QUpdateGlassRefraction(CALayer *backdrop, CGSize size, CGFloat r
     } @catch (NSException *exception) {
         // Keep the undistorted live backdrop if the private mesh API differs.
     }
-    free(vertices);
-    free(faces);
 }
 
 // Keep the glass behind Apple's content and actions. Use the same surface for
@@ -1257,6 +1348,20 @@ static void QScheduleListScaling(UIView *list) {
     if (!QHasAncestor(self, @"NCNotificationListCell")) return;
     if (!QFind(self, @"CSActivityItemContentView")) return;
     QPlayerView *player = objc_getAssociatedObject(self, QSpringBoardPlayerKey);
+    // The Now Playing UI is hosted by MediaRemoteUI in a remote scene, so its
+    // MRU child views cannot be found from SpringBoard's platter hierarchy.
+    // Ordinary Live Activities also have CSActivityItemContentView, but do not
+    // use this measured 167-point Cover Sheet scene host.
+    BOOL mediaPlatter = size.height >= 145 &&
+                        QFind(self, @"_UISceneLayerHostContainerView");
+    // 大封面展开时，MediaRemoteUI 紧凑场景被拆，场景宿主视图暂时消失。
+    // 若已为此 platter 创建了 Quart 播放器，说明它确定是 Now Playing 宿主，
+    // 不能因此退回原生样式。
+    if (!mediaPlatter && !player) {
+        self.alpha = 1;
+        self.layer.opacity = 1;
+        return;
+    }
     BOOL enabled = [qSettings[@"masterEnabled"] boolValue] && [qSettings[@"playerEnabled"] boolValue];
     if (!enabled) {
         self.alpha = 1;
