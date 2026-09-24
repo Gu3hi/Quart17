@@ -289,6 +289,7 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 - (void)setExpandedArtwork:(BOOL)expanded {
     if (_expandedArtwork == expanded) return;
     _expandedArtwork = expanded;
+    [self updateAccent];
     self.artwork.hidden = expanded;
     self.artworkProgressTrack.hidden = expanded ||
         !([self.settings[@"showProgress"] boolValue] && [self.settings[@"progressStyle"] integerValue] == 2);
@@ -559,9 +560,12 @@ static UIColor *QAccentFromImage(UIImage *image) {
     [accent getRed:&r green:&g blue:&b alpha:&a];
     BOOL dark = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark ||
                 [self.settings[@"playerAppearance"] integerValue] == 1;
-    UIColor *textAccent = dark ? [UIColor colorWithRed:MIN(1, r * 0.52 + 0.48)
-                                                  green:MIN(1, g * 0.52 + 0.48)
-                                                   blue:MIN(1, b * 0.52 + 0.48) alpha:1] : accent;
+    BOOL glassPlayer = self.expandedArtwork &&
+        [self.settings[@"playerAppearance"] integerValue] == 1;
+    CGFloat textMix = glassPlayer ? 0.76 : 0.48;
+    UIColor *textAccent = dark ? [UIColor colorWithRed:MIN(1, r * (1 - textMix) + textMix)
+                                                  green:MIN(1, g * (1 - textMix) + textMix)
+                                                   blue:MIN(1, b * (1 - textMix) + textMix) alpha:1] : accent;
     UIColor *baseProgress = [self.settings[@"progressFromArtwork"] boolValue]
         ? accent : [UIColor colorWithRed:0.18 green:0.45 blue:0.76 alpha:1];
     CGFloat pr = 0, pg = 0, pb = 0, pa = 0;
@@ -578,8 +582,8 @@ static UIColor *QAccentFromImage(UIImage *image) {
     self.titleLabel.textColor = [self.settings[@"titleFromArtwork"] boolValue]
         ? textAccent : [UIColor colorWithWhite:dark ? 0.96 : 0.15 alpha:1];
     self.artistLabel.textColor = [self.settings[@"artistFromArtwork"] boolValue]
-        ? [textAccent colorWithAlphaComponent:0.78]
-        : [UIColor colorWithWhite:dark ? 0.76 : 0.36 alpha:1];
+        ? [textAccent colorWithAlphaComponent:glassPlayer ? 0.94 : 0.78]
+        : [UIColor colorWithWhite:glassPlayer ? 0.94 : (dark ? 0.76 : 0.36) alpha:1];
     self.progress.minimumTrackTintColor = progressColor;
     self.progress.maximumTrackTintColor = [UIColor colorWithWhite:dark ? 0.85 : 0.62 alpha:dark ? 0.3 : 0.6];
     self.backgroundProgress.backgroundColor = [progressColor colorWithAlphaComponent:dark ? 0.36 : 0.18];

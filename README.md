@@ -12,7 +12,7 @@ Quart17 为越狱版 iOS 17 提供通知与锁屏播放器样式。提供 RootHi
 - 锁屏右半屏空白处连续两次下滑可清除普通通知，保留音乐控件与实时活动；左半屏下滑打开系统搜索。清除时可开启轻震动。
 - 锁屏播放器可选 Quart 原风格或液态玻璃外观。可自定义播放控制图标，并在背景、文字和进度上使用封面颜色。
 - 播放进度可选择卡片背景、底部横条或小封面环形进度条；支持拖动调整进度。
-- 点击小封面可使用系统动画展开原生大封面。大封面保留原生背景与交互，并提供独立的大小、圆角和封面外侧环形进度条；展开后仍可在播放器上调整进度。点击歌名可打开当前播放 App。
+- 点击小封面可使用系统动画展开原生大封面。大封面保留原生背景与交互，并提供独立的大小、圆角和封面外侧环形进度条；展开后仍可在播放器上调整进度。玻璃播放器在大封面展开时会提亮歌名、歌手和按钮。点击歌名可打开当前播放 App。
 - 设置页面提供中文与英文说明、总开关及不打断播放的样式刷新。
 
 ### 安装
@@ -56,7 +56,7 @@ Quart17 styles notifications and the Lock Screen player on jailbroken iOS 17. Ro
 - Swipe down twice from empty space on the right half of the Lock Screen to clear ordinary notifications while keeping media controls and Live Activities. Swipe down on the left to open system Search. Clearing can trigger a light haptic.
 - Choose the original Quart or Liquid Glass player. Playback controls can use custom icons, while the background, text, and progress can draw colors from the artwork.
 - Choose one of three seekable progress styles: card background, bottom bar, or a ring around the compact artwork.
-- Tap the compact artwork to expand the native system cover with its native animation, background, and interaction. Expanded artwork has separate size and corner controls and an outer progress ring. Seeking remains available on the player; tap the song title to open the playing app.
+- Tap the compact artwork to expand the native system cover with its native animation, background, and interaction. Expanded artwork has separate size and corner controls and an outer progress ring. Seeking remains available on the player. The glass player brightens its title, artist, and buttons while the cover is expanded; tap the song title to open the playing app.
 - Chinese and English settings include a master switch and a style refresh that keeps audio playing.
 
 ### Install

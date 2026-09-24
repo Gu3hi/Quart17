@@ -796,10 +796,15 @@ static void QStyle(UIView *root) {
             }
         }
         NSString *name = NSStringFromClass(view.class);
-        BOOL iconClass = [name containsString:@"IconView"] || [name isEqualToString:@"NCBadgedIconView"];
+        BOOL iconClass = [name containsString:@"IconView"];
         BOOL smallImage = [view isKindOfClass:UIImageView.class] && ((UIImageView *)view).image != nil;
         CGSize size = view.bounds.size;
-        if ((iconClass || smallImage) && size.width >= 24 && size.width <= 80 &&
+        // A badged icon wraps the app image and its lower-right overlay.
+        // Clipping that wrapper to a circle cuts the overlay off; round only
+        // the leaf image, or an icon view with no child overlays.
+        BOOL canClipIcon = smallImage || (iconClass && view.subviews.count == 0 &&
+            ![name containsString:@"Badged"]);
+        if (canClipIcon && size.width >= 24 && size.width <= 80 &&
             fabs(size.width - size.height) < 5) {
             CGRect position = [view convertRect:view.bounds toView:root];
             if (position.origin.x < 105) {
