@@ -3,15 +3,21 @@
 #import <objc/message.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <stdlib.h>
+#import <notify.h>
+#import <math.h>
 #import "QPlayerView.h"
 
 static NSString *const QPrefs = @"com.gushi.quart17";
 static NSMutableDictionary *qSettings;
+static int qCornerStateToken = -1;
+static BOOL qNativeArtworkExpanded;
 static NSHashTable<QPlayerView *> *qActivePlayers;
+
 static NSHashTable<UIView *> *qActivePlatters;
 static NSHashTable<UIView *> *qActiveNotifications;
 static NSHashTable<UIView *> *qActiveLists;
 static NSHashTable<UIView *> *qActiveBanners;
+static NSHashTable<UIView *> *qActiveQuickActionButtons;
 static UIWindow *qTestBannerWindow;
 static UIView *qTestBannerMaterial;
 static UILabel *qTestBannerTitle;
@@ -27,6 +33,8 @@ static void *QBannerOwnedTransformKey = &QBannerOwnedTransformKey;
 static void *QBannerShadowHiddenKey = &QBannerShadowHiddenKey;
 static void *QBannerGlassKey = &QBannerGlassKey;
 static void *QBannerGlassSheenKey = &QBannerGlassSheenKey;
+static void *QBannerGlassRimKey = &QBannerGlassRimKey;
+static void *QBannerGlassRimMaskKey = &QBannerGlassRimMaskKey;
 static void *QBannerGlassBackdropKey = &QBannerGlassBackdropKey;
 static void *QBannerGlassBlurKey = &QBannerGlassBlurKey;
 static void *QBannerGlassMeshKey = &QBannerGlassMeshKey;
@@ -43,6 +51,12 @@ static void *QSearchPanQualifiedKey = &QSearchPanQualifiedKey;
 
 
 static void QStyle(UIView *root);
+static void QStyleQuickActionButton(UIView *button);
+static CGFloat QSharedCornerRadius(CGFloat height) {
+    CGFloat roundness = [qSettings[@"playerCornerRoundness"] doubleValue];
+    roundness = isfinite(roundness) ? MAX(0, MIN(1, roundness)) : 1;
+    return MAX(0, height) * roundness / 2;
+}
 static CGFloat QShrinkScale(void);
 static void QApplyListScaling(UIView *list);
 static void QScheduleListScaling(UIView *list);
@@ -56,12 +70,17 @@ static void QHideTestBanner(void);
 - (UIView *)viewForPreview;
 @end
 
+@interface CSQuickActionsButton : UIView
+@end
+
+
 static void QLoadSettings(void) {
     NSDictionary *saved = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.gushi.quart17.plist"];
     qSettings = [@{ @"masterEnabled": @YES, @"enabled": @YES, @"darkCards": @NO,
-                    @"roundIcons": @YES, @"radius": @24,
+                    @"roundIcons": @YES,
                     @"playerEnabled": @YES, @"disableListScaling": @NO,
                     @"scaleBanners": @NO, @"glassBanners": @NO,
+                    @"playerAppearance": @0,
                     @"glassBlur": @8, @"glassRefraction": @12, @"glassHighlight": @0.5,
                     @"clearAllEnabled": @YES, @"clearHapticEnabled": @YES,
                     @"showProgress": @YES, @"backgroundProgress": @YES, @"hideRoute": @YES,
@@ -74,6 +93,22 @@ static void QLoadSettings(void) {
     }
     if (!qSettings[@"playerCornerRoundness"]) {
         qSettings[@"playerCornerRoundness"] = saved[@"roundArtwork"] && ![saved[@"roundArtwork"] boolValue] ? @0 : @1;
+    }
+    if (!qSettings[@"largeArtworkRoundness"])
+        qSettings[@"largeArtworkRoundness"] = qSettings[@"playerCornerRoundness"];
+    if (qCornerStateToken < 0)
+        notify_register_check("com.gushi.quart17/playercorner", &qCornerStateToken);
+    if (qCornerStateToken >= 0) {
+        CGFloat corner = [qSettings[@"playerCornerRoundness"] doubleValue];
+        corner = isfinite(corner) ? MAX(0, MIN(1, corner)) : 1;
+        CGFloat scale = qSettings[@"largeArtworkScale"] ?
+            [qSettings[@"largeArtworkScale"] doubleValue] : 1;
+        scale = isfinite(scale) ? MAX(0.6, MIN(1, scale)) : 1;
+        CGFloat expandedCorner = [qSettings[@"largeArtworkRoundness"] doubleValue];
+        expandedCorner = isfinite(expandedCorner) ? MAX(0, MIN(1, expandedCorner)) : corner;
+        notify_set_state(qCornerStateToken, ((uint64_t)llround(expandedCorner * 10000) << 48) |
+            ((uint64_t)llround(scale * 10000) << 32) |
+            0x51700000ULL | (uint64_t)llround(corner * 10000));
     }
 }
 
@@ -102,6 +137,7 @@ static void QChanged(CFNotificationCenterRef center, void *observer, CFStringRef
             [platter layoutIfNeeded];
         }
         for (UIView *notification in qActiveNotifications.allObjects) QStyle(notification);
+        for (UIView *button in qActiveQuickActionButtons.allObjects) QStyleQuickActionButton(button);
         for (UIView *list in qActiveLists.allObjects) QScheduleListScaling(list);
         for (UIView *banner in qActiveBanners.allObjects) QApplyBannerScaling(banner);
         QRefreshTestBanner();
@@ -186,6 +222,18 @@ static BOOL QIsLockScreenVisible(void) {
     return [manager respondsToSelector:@selector(isLockScreenVisible)] &&
            ((BOOL (*)(id, SEL))objc_msgSend)(manager, @selector(isLockScreenVisible));
 }
+
+static void QNativeArtworkVisibilityChanged(CFNotificationCenterRef center, void *observer,
+                                             CFStringRef name, const void *object,
+                                             CFDictionaryRef userInfo) {
+    BOOL expanded = CFEqual(name, CFSTR("com.gushi.quart17/nativeartworkexpanded"));
+    dispatch_async(dispatch_get_main_queue(), ^{
+        qNativeArtworkExpanded = expanded;
+        for (QPlayerView *player in qActivePlayers.allObjects)
+            [player setExpandedArtwork:expanded];
+    });
+}
+
 
 static BOOL QIsLockScreenNotification(UIView *view) {
     if (!view.window || ![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"] ||
@@ -301,8 +349,8 @@ static CGFloat QGlassSDF(CGFloat x, CGFloat y, CGSize size, CGFloat radius) {
     return hypot(MAX(qx, 0), MAX(qy, 0)) + MIN(MAX(qx, qy), 0) - radius;
 }
 
-static void QUpdateGlassRefraction(CALayer *backdrop, CGSize size, CGFloat radius,
-                                   CGFloat magnitude, UIVisualEffectView *glass) {
+extern "C" void QUpdateGlassRefraction(CALayer *backdrop, CGSize size, CGFloat radius,
+                                        CGFloat magnitude, UIVisualEffectView *glass) {
     Class meshClass = NSClassFromString(@"CAMutableMeshTransform");
     SEL create = NSSelectorFromString(@"meshTransformWithVertexCount:vertices:faceCount:faces:depthNormalization:");
     if (!backdrop || !meshClass || ![meshClass respondsToSelector:create] ||
@@ -385,20 +433,21 @@ static void QSetLockGlassShadowHidden(UIView *material, BOOL hidden) {
     }
 }
 
-static void QApplyBannerGlass(UIView *root, UIView *material) {
+static void QApplyGlassSurface(UIView *root, UIView *material, BOOL quickAction) {
     if (!material) return;
     UIVisualEffectView *glass = objc_getAssociatedObject(material, QBannerGlassKey);
     BOOL enabled = [qSettings[@"masterEnabled"] boolValue] &&
         [qSettings[@"enabled"] boolValue] && [qSettings[@"glassBanners"] boolValue] &&
-        (QIsDesktopBanner(root) || QIsLockScreenNotification(root));
+        (quickAction || QIsDesktopBanner(root) || QIsLockScreenNotification(root));
     if (!enabled || !material.superview) {
         [glass removeFromSuperview];
         objc_setAssociatedObject(material, QBannerGlassKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        QSetLockGlassShadowHidden(material, NO);
+        material.hidden = NO;
+        if (!quickAction) QSetLockGlassShadowHidden(material, NO);
         return;
     }
     BOOL lockNotification = QIsLockScreenNotification(root);
-    QSetLockGlassShadowHidden(material, lockNotification);
+    if (!quickAction) QSetLockGlassShadowHidden(material, lockNotification);
     // Both banner locations use the same live backdrop renderer. The lock
     // cell's appearance is fixed separately so its folded material is dark.
     BOOL compatibleLockGlass = NO;
@@ -413,7 +462,7 @@ static void QApplyBannerGlass(UIView *root, UIView *material) {
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         glass.userInteractionEnabled = NO;
         glass.clipsToBounds = YES;
-        glass.layer.cornerCurve = kCACornerCurveContinuous;
+        glass.layer.cornerCurve = kCACornerCurveCircular;
         // iOS 17's stock material adds a gray tint. A live backdrop layer lets
         // the banner sample the app underneath with much less color wash.
         // Keep the public blur effect as a fallback if that layer is missing.
@@ -441,9 +490,21 @@ static void QApplyBannerGlass(UIView *root, UIView *material) {
             }
         }
         CAGradientLayer *sheen = [CAGradientLayer layer];
-        sheen.locations = @[@0, @0.48, @1];
+        sheen.locations = @[@0, @0.16, @0.56, @1];
         [glass.contentView.layer addSublayer:sheen];
         objc_setAssociatedObject(glass, QBannerGlassSheenKey, sheen, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // Keep the reflected light on the rounded edge instead of washing
+        // out notification text across the whole card.
+        CAGradientLayer *rim = [CAGradientLayer layer];
+        rim.locations = @[@0, @0.22, @0.7, @1];
+        CALayer *rimMask = [CALayer layer];
+        rimMask.borderColor = UIColor.whiteColor.CGColor;
+        rimMask.borderWidth = 0.9;
+        rimMask.cornerCurve = kCACornerCurveCircular;
+        rim.mask = rimMask;
+        [glass.contentView.layer addSublayer:rim];
+        objc_setAssociatedObject(glass, QBannerGlassRimKey, rim, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(glass, QBannerGlassRimMaskKey, rimMask, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(material, QBannerGlassKey, glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     UITraitCollection *systemTraits = lockNotification ? root.window.traitCollection : root.traitCollection;
@@ -451,7 +512,9 @@ static void QApplyBannerGlass(UIView *root, UIView *material) {
     // The Lock Screen cell must stay in dark appearance to avoid black
     // collapsed-stack materials in light system appearance. Match the banner's
     // glass treatment while keeping that independent appearance choice.
-    BOOL dark = lockNotification || systemDark;
+    // Match the Lock Screen notification's dark glass. A separate light veil
+    // made the native shortcut disks much more opaque than the cards.
+    BOOL dark = quickAction || lockNotification || systemDark;
     if (compatibleLockGlass) {
         CALayer *oldBackdrop = objc_getAssociatedObject(glass, QBannerGlassBackdropKey);
         [oldBackdrop removeFromSuperlayer];
@@ -483,33 +546,77 @@ static void QApplyBannerGlass(UIView *root, UIView *material) {
         objc_setAssociatedObject(glass, QBannerGlassStyleKey, styleNumber, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     glass.alpha = 1;
-    glass.contentView.backgroundColor = nil;
+    // A very light neutral veil diffuses busy wallpaper without hiding it.
+    glass.contentView.backgroundColor = dark ? [UIColor colorWithWhite:0.35 alpha:0.10] :
+        [UIColor colorWithWhite:1 alpha:0.07];
     glass.frame = material.frame;
     glass.autoresizingMask = material.autoresizingMask;
     CALayer *backdrop = objc_getAssociatedObject(glass, QBannerGlassBackdropKey);
     backdrop.frame = glass.bounds;
     id blurFilter = objc_getAssociatedObject(glass, QBannerGlassBlurKey);
     if (blurFilter) [blurFilter setValue:@(blurRadius) forKey:@"inputRadius"];
+    CGFloat cardRadius = quickAction ? MIN(glass.bounds.size.width, glass.bounds.size.height) / 2 :
+        MIN(root.layer.cornerRadius, MIN(glass.bounds.size.width, glass.bounds.size.height) / 2);
+    if (!quickAction) material.layer.cornerRadius = cardRadius;
+    glass.layer.cornerRadius = cardRadius;
     QUpdateGlassRefraction(backdrop, glass.bounds.size, glass.layer.cornerRadius,
-                           refraction, glass);
-    glass.layer.cornerRadius = material.layer.cornerRadius;
-    glass.layer.borderWidth = compatibleLockGlass ? 0 : 0.75;
-    // A white rim disappears against bright apps. Use a faint dark outline in
-    // light mode while retaining the specular top edge inside the material.
-    glass.layer.borderColor = (dark ? [UIColor colorWithWhite:1 alpha:0.26] :
-                                    [UIColor colorWithWhite:0 alpha:0.16]).CGColor;
+                           refraction * 0.65, glass);
+    // The gradient rim supplies the only outline. A second layer border made
+    // the Lock Screen cards look like concentric strokes.
+    glass.layer.borderWidth = 0;
     CAGradientLayer *sheen = objc_getAssociatedObject(glass, QBannerGlassSheenKey);
     sheen.frame = glass.bounds;
-    sheen.colors = dark ? @[(id)[UIColor colorWithWhite:1 alpha:0.26 * highlight].CGColor,
-                             (id)[UIColor colorWithWhite:1 alpha:0.04 * highlight].CGColor,
-                             (id)[UIColor colorWithWhite:0 alpha:0.13].CGColor]
-                        : @[(id)[UIColor colorWithWhite:1 alpha:0.52 * highlight].CGColor,
-                             (id)[UIColor colorWithWhite:1 alpha:0.05 * highlight].CGColor,
-                             (id)[UIColor colorWithWhite:0 alpha:0.08].CGColor];
+    sheen.colors = dark ? @[(id)[UIColor colorWithWhite:1 alpha:0.22 * highlight].CGColor,
+                             (id)[UIColor colorWithWhite:1 alpha:0.07 * highlight].CGColor,
+                             (id)[UIColor colorWithWhite:1 alpha:0.01].CGColor,
+                             (id)[UIColor colorWithWhite:0 alpha:0.11].CGColor]
+                        : @[(id)[UIColor colorWithWhite:1 alpha:0.34 * highlight].CGColor,
+                             (id)[UIColor colorWithWhite:1 alpha:0.12 * highlight].CGColor,
+                             (id)[UIColor colorWithWhite:1 alpha:0.01].CGColor,
+                             (id)[UIColor colorWithWhite:0 alpha:0.07].CGColor];
     sheen.opacity = 1;
+    CAGradientLayer *rim = objc_getAssociatedObject(glass, QBannerGlassRimKey);
+    CALayer *rimMask = objc_getAssociatedObject(glass, QBannerGlassRimMaskKey);
+    rim.frame = glass.bounds;
+    CGFloat inset = rimMask.borderWidth / 2;
+    rimMask.frame = CGRectInset(rim.bounds, inset, inset);
+    rimMask.cornerRadius = MAX(0, cardRadius - inset);
+    rim.colors = dark ? @[(id)[UIColor colorWithWhite:1 alpha:0.34 * highlight].CGColor,
+                          (id)[UIColor colorWithWhite:1 alpha:0.12 * highlight].CGColor,
+                          (id)[UIColor colorWithWhite:1 alpha:0.04 * highlight].CGColor,
+                          (id)[UIColor colorWithWhite:1 alpha:0.16 * highlight].CGColor]
+                      : @[(id)[UIColor colorWithWhite:1 alpha:0.52 * highlight].CGColor,
+                          (id)[UIColor colorWithWhite:1 alpha:0.18 * highlight].CGColor,
+                          (id)[UIColor colorWithWhite:0 alpha:0.08 * highlight].CGColor,
+                          (id)[UIColor colorWithWhite:1 alpha:0.28 * highlight].CGColor];
     if (glass.superview != material.superview)
         [material.superview insertSubview:glass aboveSubview:material];
     material.hidden = YES;
+}
+
+static void QApplyBannerGlass(UIView *root, UIView *material) {
+    QApplyGlassSurface(root, material, NO);
+}
+
+static void QStyleQuickActionButton(UIView *button) {
+    // The visible disk is the 50-point effect view nested inside Apple's
+    // 86-point CSQuickActionsButton. Replace only that disk and leave its
+    // native glyph, hit target, and press animation in place.
+    UIVisualEffectView *material = nil;
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:button];
+    while (queue.count && !material) {
+        UIView *view = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if ([view isKindOfClass:UIVisualEffectView.class] && view != button &&
+            view.bounds.size.width >= 40 && view.bounds.size.width <= 60 &&
+            view.bounds.size.height >= 40 && view.bounds.size.height <= 60 &&
+            !objc_getAssociatedObject(view, QBannerGlassCompatibilityKey)) {
+            material = (UIVisualEffectView *)view;
+        } else {
+            [queue addObjectsFromArray:view.subviews];
+        }
+    }
+    if (material) QApplyGlassSurface(button, material, YES);
 }
 
 // A persistent SpringBoard preview uses the exact desktop glass renderer.
@@ -518,13 +625,13 @@ static void QApplyBannerGlass(UIView *root, UIView *material) {
 static void QRefreshTestBanner(void) {
     if (!qTestBannerWindow || !qTestBannerMaterial) return;
     UIView *root = qTestBannerWindow.rootViewController.view;
-    CGFloat radius = MAX(8, MIN(40, [qSettings[@"radius"] doubleValue]));
+    CGFloat radius = QSharedCornerRadius(root.bounds.size.height);
     root.layer.cornerRadius = radius;
-    root.layer.cornerCurve = kCACornerCurveContinuous;
+    root.layer.cornerCurve = kCACornerCurveCircular;
     root.clipsToBounds = YES;
     qTestBannerMaterial.frame = root.bounds;
     qTestBannerMaterial.layer.cornerRadius = radius;
-    qTestBannerMaterial.layer.cornerCurve = kCACornerCurveContinuous;
+    qTestBannerMaterial.layer.cornerCurve = kCACornerCurveCircular;
     qTestBannerMaterial.clipsToBounds = YES;
     UIVisualEffectView *previousGlass = objc_getAssociatedObject(qTestBannerMaterial, QBannerGlassKey);
     [previousGlass removeFromSuperview];
@@ -653,16 +760,16 @@ static void QStyle(UIView *root) {
         QApplyBannerGlass(root, material);
         return;
     }
-    CGFloat radius = MAX(8, MIN(40, [qSettings[@"radius"] doubleValue]));
+    CGFloat radius = QSharedCornerRadius(root.bounds.size.height);
     QRememberStyle(root);
     root.layer.cornerRadius = radius;
-    root.layer.cornerCurve = kCACornerCurveContinuous;
+    root.layer.cornerCurve = kCACornerCurveCircular;
     root.clipsToBounds = YES;
 
     if (material) {
         QRememberStyle(material);
         material.layer.cornerRadius = radius;
-        material.layer.cornerCurve = kCACornerCurveContinuous;
+        material.layer.cornerCurve = kCACornerCurveCircular;
         material.clipsToBounds = YES;
         if ([qSettings[@"darkCards"] boolValue] || lockNotification) {
             material.backgroundColor = [UIColor colorWithWhite:0.055 alpha:0.82];
@@ -709,6 +816,7 @@ static void QStyle(UIView *root) {
 @interface PLPlatterView : UIView
 @end
 static void *QSpringBoardPlayerKey = &QSpringBoardPlayerKey;
+extern "C" void QInstallNativeArtworkHooks(void);
 
 %group QNotifications
 %hook NCNotificationShortLookViewController
@@ -753,6 +861,20 @@ static void *QSpringBoardPlayerKey = &QSpringBoardPlayerKey;
                    dispatch_get_main_queue(), ^{
         QApplyBannerScaling(surface);
     });
+}
+
+%end
+%end
+
+#pragma mark - 锁屏快捷按钮玻璃
+
+%group QQuickActions
+%hook CSQuickActionsButton
+
+- (void)layoutSubviews {
+    %orig;
+    [qActiveQuickActionButtons addObject:self];
+    QStyleQuickActionButton(self);
 }
 
 %end
@@ -1126,13 +1248,14 @@ static void QScheduleListScaling(UIView *list) {
     %orig;
     if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"]) return;
     CGSize size = self.bounds.size;
-    if (size.width < 340 || size.width > 500 || size.height < 145 || size.height > 195) return;
+    if (size.width < 340 || size.width > 500 || size.height < 65 || size.height > 195) return;
     if (!QHasAncestor(self, @"NCNotificationListCell")) return;
     if (!QFind(self, @"CSActivityItemContentView")) return;
     QPlayerView *player = objc_getAssociatedObject(self, QSpringBoardPlayerKey);
     BOOL enabled = [qSettings[@"masterEnabled"] boolValue] && [qSettings[@"playerEnabled"] boolValue];
     if (!enabled) {
         self.alpha = 1;
+        self.layer.opacity = 1;
         player.hidden = YES;
         return;
     }
@@ -1145,6 +1268,7 @@ static void QScheduleListScaling(UIView *list) {
         objc_setAssociatedObject(self, QSpringBoardPlayerKey, player, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         [qActivePlayers addObject:player];
         [qActivePlatters addObject:self];
+        [player setExpandedArtwork:qNativeArtworkExpanded];
     }
     for (UIView *sibling in [container.subviews copy]) {
         if (sibling != player && [sibling isKindOfClass:QPlayerView.class]) [sibling removeFromSuperview];
@@ -1154,9 +1278,20 @@ static void QScheduleListScaling(UIView *list) {
     // transform 一起等比缩小。若这里再乘一次 s 会得到 s²（78% 会变成约 61%）。
     // 内部度量由 QPlayerView 的 sizeFactor 按自身 bounds 推出，bounds 未受
     // transform 影响，因此内部仍按设计尺寸布局，再整体被 transform 缩下去。
-    CGFloat height = MIN(88, size.height);
-    CGRect frame = [self convertRect:CGRectMake(0, (size.height - height) / 2,
+    UIView *cell = self;
+    while (cell && ![NSStringFromClass(cell.class) isEqualToString:@"NCNotificationListCell"])
+        cell = cell.superview;
+    CGRect safeRect = cell ? [cell convertRect:cell.bounds toView:container] : container.bounds;
+    CGFloat height = MIN(88, MAX(50, safeRect.size.height - 8));
+    // The native activity cell is taller than the compact player. Keep the
+    // player inside that cell, but halve the empty space below it so the next
+    // notification visually sits closer without changing list geometry.
+    CGRect frame = [self convertRect:CGRectMake(0, (size.height - height) * 0.75,
                                                size.width, height) toView:container];
+    if (!CGRectIsEmpty(safeRect)) {
+        frame.origin.y = MIN(frame.origin.y, CGRectGetMaxY(safeRect) - frame.size.height - 4);
+        frame.origin.y = MAX(frame.origin.y, CGRectGetMinY(safeRect) + 4);
+    }
     CGFloat scale = UIScreen.mainScreen.scale;
     player.frame = CGRectMake(round(frame.origin.x * scale) / scale,
                               round(frame.origin.y * scale) / scale,
@@ -1166,7 +1301,10 @@ static void QScheduleListScaling(UIView *list) {
     [player seedFromNativePlayer:self];
     [container bringSubviewToFront:player];
     player.hidden = NO;
-    self.alpha = 0;
+    // CALayer opacity hides the original platter visually while UIView alpha
+    // stays at 1, so UIKit can still deliver artwork taps to its native view.
+    self.alpha = 1;
+    self.layer.opacity = 0;
 }
 
 %end
@@ -1175,16 +1313,29 @@ static void QScheduleListScaling(UIView *list) {
 
 %ctor {
     @autoreleasepool {
+        if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.MediaRemoteUI"]) {
+            QInstallNativeArtworkHooks();
+            return;
+        }
         qActivePlayers = [NSHashTable weakObjectsHashTable];
         qActivePlatters = [NSHashTable weakObjectsHashTable];
         qActiveNotifications = [NSHashTable weakObjectsHashTable];
         qActiveLists = [NSHashTable weakObjectsHashTable];
         qActiveBanners = [NSHashTable weakObjectsHashTable];
+        qActiveQuickActionButtons = [NSHashTable weakObjectsHashTable];
         QLoadSettings();
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
                                         QChanged, CFSTR("com.gushi.quart17/preferenceschanged"),
                                         NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"]) {
+            CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+                                            QNativeArtworkVisibilityChanged,
+                                            CFSTR("com.gushi.quart17/nativeartworkexpanded"), NULL,
+                                            CFNotificationSuspensionBehaviorDeliverImmediately);
+            CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+                                            QNativeArtworkVisibilityChanged,
+                                            CFSTR("com.gushi.quart17/nativeartworkcollapsed"), NULL,
+                                            CFNotificationSuspensionBehaviorDeliverImmediately);
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
                                             QOpenPlayingApp, CFSTR("com.gushi.quart17/openplayingapp"),
                                             NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
@@ -1196,6 +1347,7 @@ static void QScheduleListScaling(UIView *list) {
                                             NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         }
         if (objc_getClass("NCNotificationShortLookViewController")) %init(QNotifications);
+        if (objc_getClass("CSQuickActionsButton")) %init(QQuickActions);
         if (objc_getClass("PLPlatterView")) %init(QHostPlatter);
         if (objc_getClass("NCNotificationListCell")) %init(QScale);
         if (objc_getClass("NCNotificationMasterList")) %init(QMasterGesture);

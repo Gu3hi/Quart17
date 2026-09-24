@@ -6,4 +6,6 @@
 - (void)seedFromNativePlayer:(UIView *)player;
 - (void)setSuppressSiblingViews:(BOOL)suppress;
 - (void)setUsesNativeMetadataFallback:(BOOL)enabled;
+- (BOOL)containsArtworkAtPoint:(CGPoint)point;
+- (void)setExpandedArtwork:(BOOL)expanded;
 @end

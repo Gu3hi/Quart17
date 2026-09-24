@@ -1,8 +1,15 @@
 #import "QPlayerView.h"
 #import <AVKit/AVKit.h>
+#import <QuartzCore/CADisplayLink.h>
 #import <dlfcn.h>
 #import <objc/message.h>
 #import <roothide.h>
+#import <notify.h>
+#import <math.h>
+
+
+extern void QUpdateGlassRefraction(CALayer *backdrop, CGSize size, CGFloat radius,
+                                   CGFloat magnitude, UIVisualEffectView *glass);
 
 typedef void (^QInfoCompletion)(CFDictionaryRef);
 typedef void (^QPlayingCompletion)(Boolean);
@@ -14,6 +21,17 @@ static void (*QRegisterNotifications)(dispatch_queue_t);
 static CFStringRef *QTitleKey, *QArtistKey, *QArtworkKey, *QDurationKey;
 static CFStringRef *QElapsedKey, *QTimestampKey, *QRateKey;
 static CFStringRef *QUniqueKey;
+static int qExpandedSeekToken = -1;
+
+static void QPublishExpandedSeek(CGFloat fraction, BOOL dragging) {
+    if (qExpandedSeekToken < 0)
+        notify_register_check("com.gushi.quart17/artworkseek", &qExpandedSeekToken);
+    if (qExpandedSeekToken < 0) return;
+    uint64_t value = (dragging ? (1ULL << 63) : 0) |
+        (uint64_t)llround(MIN(1, MAX(0, fraction)) * 1000000);
+    notify_set_state(qExpandedSeekToken, value);
+    notify_post("com.gushi.quart17/artworkseek");
+}
 
 static NSString *QKey(CFStringRef *symbol, NSString *fallback) {
     return symbol && *symbol ? (__bridge NSString *)*symbol : fallback;
@@ -210,17 +228,23 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 
 @end
 
-@interface QPlayerView ()
+@interface QPlayerView () <UIGestureRecognizerDelegate>
 @property (nonatomic, strong) UIImageView *artwork;
+@property (nonatomic, assign) BOOL expandedArtwork;
 @property (nonatomic, strong) CAShapeLayer *artworkProgressTrack;
 @property (nonatomic, strong) CAShapeLayer *artworkProgressRing;
 @property (nonatomic, strong) UIView *artworkSeekArea;
+@property (nonatomic, strong) UIPanGestureRecognizer *expandedSeekPan;
 @property (nonatomic, strong) QMarqueeLabel *titleLabel;
 @property (nonatomic, strong) QMarqueeLabel *artistLabel;
 @property (nonatomic, strong) UILabel *elapsedLabel;
 @property (nonatomic, strong) UILabel *remainingLabel;
 @property (nonatomic, strong) UISlider *progress;
 @property (nonatomic, strong) UIView *backgroundProgress;
+@property (nonatomic, strong) UIVisualEffectView *glassSurface;
+@property (nonatomic, strong) CALayer *glassBackdrop;
+@property (nonatomic, strong) id glassBlurFilter;
+@property (nonatomic, strong) CAGradientLayer *glassSheen;
 @property (nonatomic, strong) UIView *backgroundSeekArea;
 @property (nonatomic, strong) QOutlineButton *previousButton;
 @property (nonatomic, strong) QOutlineButton *playButton;
@@ -252,9 +276,34 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 - (CGFloat)sizeFactor;
 - (CGFloat)artworkSide;
 - (void)updateScaledFonts;
+- (void)updateGlassSurface;
 @end
 
 @implementation QPlayerView
+
+- (BOOL)containsArtworkAtPoint:(CGPoint)point {
+    return !self.hidden && !self.expandedArtwork && self.artwork.image &&
+        CGRectContainsPoint(CGRectInset(self.artwork.frame, 4, 4), point);
+}
+
+- (void)setExpandedArtwork:(BOOL)expanded {
+    if (_expandedArtwork == expanded) return;
+    _expandedArtwork = expanded;
+    self.artwork.hidden = expanded;
+    self.artworkProgressTrack.hidden = expanded ||
+        !([self.settings[@"showProgress"] boolValue] && [self.settings[@"progressStyle"] integerValue] == 2);
+    self.artworkProgressRing.hidden = self.artworkProgressTrack.hidden;
+    self.artworkSeekArea.hidden = expanded || self.artworkProgressTrack.hidden;
+    self.backgroundSeekArea.hidden = expanded ||
+        !([self.settings[@"showProgress"] boolValue] && [self.settings[@"progressStyle"] integerValue] == 0);
+    [self setNeedsLayout];
+    [UIView animateWithDuration:0.24 delay:0 options:UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{ [self layoutIfNeeded]; } completion:nil];
+}
+
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    return [super hitTest:point withEvent:event];
+}
 
 - (void)setHidden:(BOOL)hidden {
     [super setHidden:hidden];
@@ -289,7 +338,7 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
         _artwork.clipsToBounds = YES;
         _artwork.backgroundColor = [UIColor colorWithWhite:0.78 alpha:1];
         _artwork.userInteractionEnabled = YES;
-        [_artwork addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(openPlayingApp:)]];
+        [_artwork addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(artworkTapped:)]];
         [self addSubview:_artwork];
 
         _artworkProgressTrack = [CAShapeLayer layer];
@@ -307,10 +356,18 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
         [_artworkSeekArea addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(artworkSeekPanned:)]];
         [self addSubview:_artworkSeekArea];
 
+        _expandedSeekPan = [[UIPanGestureRecognizer alloc] initWithTarget:self
+                                                                   action:@selector(artworkSeekPanned:)];
+        _expandedSeekPan.cancelsTouchesInView = NO;
+        _expandedSeekPan.delegate = self;
+        [self addGestureRecognizer:_expandedSeekPan];
+
         _titleLabel = [QMarqueeLabel new];
         _titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
         _titleLabel.textColor = [UIColor colorWithWhite:0.15 alpha:1];
         _titleLabel.text = @"";
+        _titleLabel.userInteractionEnabled = YES;
+        [_titleLabel addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(openPlayingApp:)]];
         [self addSubview:_titleLabel];
 
         _artistLabel = [QMarqueeLabel new];
@@ -451,16 +508,18 @@ static const CGFloat kQPlayerArtworkDesign = 60.0;
     BOOL showProgress = [settings[@"showProgress"] boolValue];
     self.progress.hidden = !showProgress || progressStyle != 1;
     self.backgroundProgress.hidden = !showProgress || progressStyle != 0;
-    self.backgroundSeekArea.hidden = !showProgress || progressStyle != 0;
+    self.backgroundSeekArea.hidden = self.expandedArtwork || !showProgress || progressStyle != 0;
     BOOL showArtworkRing = showProgress && progressStyle == 2;
-    self.artworkProgressTrack.hidden = !showArtworkRing;
-    self.artworkProgressRing.hidden = !showArtworkRing;
-    self.artworkSeekArea.hidden = !showArtworkRing;
+    self.artwork.hidden = self.expandedArtwork;
+    self.artworkProgressTrack.hidden = !showArtworkRing || self.expandedArtwork;
+    self.artworkProgressRing.hidden = !showArtworkRing || self.expandedArtwork;
+    self.artworkSeekArea.hidden = self.expandedArtwork || !showArtworkRing;
     self.elapsedLabel.hidden = !showProgress;
     self.remainingLabel.hidden = !showProgress;
     self.routeView.hidden = [settings[@"hideRoute"] boolValue];
     [self updateControlImages];
     [self updateAccent];
+    [self updateGlassSurface];
     [self updateScaledFonts];   // 字号只在这里更新（布局之外），避免布局递归
     [self setNeedsLayout];
 }
@@ -498,7 +557,8 @@ static UIColor *QAccentFromImage(UIImage *image) {
     self.artworkAccent = accent;
     CGFloat r = 0, g = 0, b = 0, a = 0;
     [accent getRed:&r green:&g blue:&b alpha:&a];
-    BOOL dark = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
+    BOOL dark = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark ||
+                [self.settings[@"playerAppearance"] integerValue] == 1;
     UIColor *textAccent = dark ? [UIColor colorWithRed:MIN(1, r * 0.52 + 0.48)
                                                   green:MIN(1, g * 0.52 + 0.48)
                                                    blue:MIN(1, b * 0.52 + 0.48) alpha:1] : accent;
@@ -510,9 +570,11 @@ static UIColor *QAccentFromImage(UIImage *image) {
                                                     green:pg * 0.55 + 0.45
                                                      blue:pb * 0.55 + 0.45 alpha:1] : baseProgress;
     self.backgroundColor = [self.settings[@"backgroundFromArtwork"] boolValue]
-        ? (dark ? [UIColor colorWithRed:r * 0.22 + 0.08 green:g * 0.22 + 0.08 blue:b * 0.22 + 0.08 alpha:0.97]
-                : [UIColor colorWithRed:r * 0.18 + 0.82 green:g * 0.18 + 0.82 blue:b * 0.18 + 0.82 alpha:0.97])
+        ? (dark ? [UIColor colorWithRed:r * 0.55 + 0.04 green:g * 0.55 + 0.04 blue:b * 0.55 + 0.04 alpha:0.97]
+                : [UIColor colorWithRed:r * 0.38 + 0.60 green:g * 0.38 + 0.60 blue:b * 0.38 + 0.60 alpha:0.97])
         : [UIColor colorWithWhite:dark ? 0.14 : 0.93 alpha:0.96];
+    if ([self.settings[@"playerAppearance"] integerValue] == 1)
+        self.backgroundColor = UIColor.clearColor;
     self.titleLabel.textColor = [self.settings[@"titleFromArtwork"] boolValue]
         ? textAccent : [UIColor colorWithWhite:dark ? 0.96 : 0.15 alpha:1];
     self.artistLabel.textColor = [self.settings[@"artistFromArtwork"] boolValue]
@@ -527,6 +589,77 @@ static UIColor *QAccentFromImage(UIImage *image) {
     self.previousButton.tintColor = textAccent;
     self.playButton.tintColor = textAccent;
     self.nextButton.tintColor = textAccent;
+}
+
+- (void)updateGlassSurface {
+    BOOL enabled = [self.settings[@"playerAppearance"] integerValue] == 1;
+    if (!enabled) {
+        [self.glassSurface removeFromSuperview];
+        self.glassSurface = nil;
+        self.glassBackdrop = nil;
+        self.glassBlurFilter = nil;
+        self.glassSheen = nil;
+        return;
+    }
+    if (!self.glassSurface) {
+        UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:nil];
+        glass.userInteractionEnabled = NO;
+        glass.clipsToBounds = YES;
+        glass.layer.cornerCurve = kCACornerCurveCircular;
+        Class backdropClass = NSClassFromString(@"CABackdropLayer");
+        Class filterClass = NSClassFromString(@"CAFilter");
+        SEL filterSelector = NSSelectorFromString(@"filterWithName:");
+        if (backdropClass && filterClass && [filterClass respondsToSelector:filterSelector]) {
+            @try {
+                CALayer *backdrop = ((id (*)(id, SEL))objc_msgSend)(backdropClass, @selector(layer));
+                id blur = ((id (*)(id, SEL, id))objc_msgSend)(filterClass, filterSelector, @"gaussianBlur");
+                if (backdrop && blur) {
+                    [backdrop setValue:@[blur] forKey:@"filters"];
+                    [backdrop setValue:@1 forKey:@"scale"];
+                    backdrop.rasterizationScale = UIScreen.mainScreen.scale;
+                    [glass.layer insertSublayer:backdrop atIndex:0];
+                    self.glassBackdrop = backdrop;
+                    self.glassBlurFilter = blur;
+                }
+            } @catch (NSException *exception) {}
+        }
+        CAGradientLayer *sheen = [CAGradientLayer layer];
+        sheen.locations = @[@0, @0.48, @1];
+        [glass.contentView.layer addSublayer:sheen];
+        self.glassSheen = sheen;
+        [self insertSubview:glass atIndex:0];
+        self.glassSurface = glass;
+    }
+    BOOL dark = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark ||
+                [self.settings[@"playerAppearance"] integerValue] == 1;
+    CGFloat blur = self.settings[@"glassBlur"] ? [self.settings[@"glassBlur"] doubleValue] : 8;
+    CGFloat refraction = self.settings[@"glassRefraction"] ? [self.settings[@"glassRefraction"] doubleValue] : 12;
+    CGFloat highlight = self.settings[@"glassHighlight"] ? [self.settings[@"glassHighlight"] doubleValue] : 0.5;
+    blur = isfinite(blur) ? MAX(0, MIN(18, blur)) : 8;
+    refraction = isfinite(refraction) ? MAX(0, MIN(24, refraction)) : 12;
+    highlight = isfinite(highlight) ? MAX(0, MIN(1, highlight)) : 0.5;
+    if (self.glassBackdrop) {
+        [self.glassBlurFilter setValue:@(blur) forKey:@"inputRadius"];
+    } else {
+        UIBlurEffectStyle style = dark ? UIBlurEffectStyleSystemUltraThinMaterialDark : UIBlurEffectStyleSystemUltraThinMaterialLight;
+        self.glassSurface.effect = blur < 0.5 ? nil : [UIBlurEffect effectWithStyle:style];
+    }
+    self.glassSurface.overrideUserInterfaceStyle = dark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
+    self.glassSurface.frame = self.bounds;
+    self.glassBackdrop.frame = self.glassSurface.bounds;
+    self.glassSurface.layer.cornerRadius = self.layer.cornerRadius;
+    QUpdateGlassRefraction(self.glassBackdrop, self.bounds.size, self.layer.cornerRadius,
+                           refraction, self.glassSurface);
+    self.glassSurface.layer.borderWidth = 0.75;
+    self.glassSurface.layer.borderColor = (dark ? [UIColor colorWithWhite:1 alpha:0.26] :
+                                         [UIColor colorWithWhite:0 alpha:0.16]).CGColor;
+    self.glassSheen.frame = self.glassSurface.bounds;
+    self.glassSheen.colors = dark ? @[(id)[UIColor colorWithWhite:1 alpha:0.26 * highlight].CGColor,
+                                      (id)[UIColor colorWithWhite:1 alpha:0.04 * highlight].CGColor,
+                                      (id)[UIColor colorWithWhite:0 alpha:0.13].CGColor]
+                                  : @[(id)[UIColor colorWithWhite:1 alpha:0.52 * highlight].CGColor,
+                                      (id)[UIColor colorWithWhite:1 alpha:0.05 * highlight].CGColor,
+                                      (id)[UIColor colorWithWhite:0 alpha:0.08].CGColor];
 }
 
 static NSString *QTime(NSTimeInterval value) {
@@ -810,6 +943,10 @@ static NSString *QTextInView(UIView *root) {
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          CFSTR("com.gushi.quart17/openplayingapp"), NULL, NULL, YES);
 }
+- (void)artworkTapped:(id)sender {
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.gushi.quart17/togglenativeartwork"), NULL, NULL, YES);
+}
 - (void)scrubStarted:(id)sender { self.scrubbing = YES; }
 - (void)seekTapped:(UITapGestureRecognizer *)gesture {
     UIView *area = gesture.view;
@@ -855,11 +992,17 @@ static CGFloat QArtworkSeekFraction(UIView *area, CGPoint point) {
 - (void)artworkSeekTapped:(UITapGestureRecognizer *)gesture {
     UIView *area = gesture.view;
     CGPoint point = [gesture locationInView:area];
+    if (self.expandedArtwork) {
+        self.progress.value = QArtworkSeekFraction(area, point);
+        [self updateProgressFill];
+        [self scrubEnded:self.progress];
+        return;
+    }
     CGRect artFrame = [self.artwork convertRect:self.artwork.bounds toView:area];
     CGPoint center = CGPointMake(CGRectGetMidX(artFrame), CGRectGetMidY(artFrame));
     CGFloat distance = hypot(point.x - center.x, point.y - center.y);
     if (distance < MIN(artFrame.size.width, artFrame.size.height) / 2 - 6) {
-        [self openPlayingApp:area];
+        [self artworkTapped:area];
         return;
     }
     self.progress.value = QArtworkSeekFraction(area, point);
@@ -871,11 +1014,13 @@ static CGFloat QArtworkSeekFraction(UIView *area, CGPoint point) {
         gesture.state != UIGestureRecognizerStateChanged &&
         gesture.state != UIGestureRecognizerStateEnded &&
         gesture.state != UIGestureRecognizerStateCancelled) return;
+    BOOL expandedSeek = gesture == self.expandedSeekPan && self.expandedArtwork;
     // 封面进度：相对拖拽，拖动 0.6 倍播放器宽度走完全程
     if (gesture.state == UIGestureRecognizerStateBegan) {
         self.scrubbing = YES;
         self.dragStartProgress = MIN(1, MAX(0, self.progress.value));
         self.dragStartX = [gesture translationInView:self].x;
+        if (expandedSeek) QPublishExpandedSeek(self.progress.value, YES);
         return;
     }
     if (gesture.state == UIGestureRecognizerStateChanged) {
@@ -883,9 +1028,26 @@ static CGFloat QArtworkSeekFraction(UIView *area, CGPoint point) {
         self.progress.value = MIN(1, MAX(0, self.dragStartProgress +
                                          ([gesture translationInView:self].x - self.dragStartX) / span));
         [self updateProgressFill];
+        if (expandedSeek) QPublishExpandedSeek(self.progress.value, YES);
         return;
     }
     [self scrubEnded:self.progress];
+    if (expandedSeek) QPublishExpandedSeek(self.progress.value, NO);
+}
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
+    if (gesture != self.expandedSeekPan) return YES;
+    if (!self.expandedArtwork || self.duration <= 0 ||
+        ![self.settings[@"showProgress"] boolValue]) return NO;
+    CGPoint point = [gesture locationInView:self];
+    if (!self.progress.hidden && CGRectContainsPoint(self.progress.frame, point)) return NO;
+    CGPoint velocity = [(UIPanGestureRecognizer *)gesture velocityInView:self];
+    return fabs(velocity.x) > fabs(velocity.y) * 1.25;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gesture
+    shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGesture {
+    return gesture == self.expandedSeekPan && self.expandedArtwork;
 }
 - (void)scrubEnded:(id)sender {
     self.scrubbing = NO;
@@ -927,6 +1089,7 @@ static CGFloat QArtworkSeekFraction(UIView *area, CGPoint point) {
     roundness = isfinite(roundness) ? MIN(1, MAX(0, roundness)) : 1;
     self.layer.cornerRadius = h * roundness / 2;
     self.layer.cornerCurve = kCACornerCurveCircular;
+    [self updateGlassSurface];
     self.backgroundProgress.layer.cornerCurve = kCACornerCurveCircular;
     self.backgroundProgress.layer.allowsEdgeAntialiasing = YES;
     [self updateProgressFill];
@@ -969,7 +1132,7 @@ static CGFloat QArtworkSeekFraction(UIView *area, CGPoint point) {
     self.artworkProgressRing.path = ringPath;
     [CATransaction commit];
     CGPathRelease(ringPath);
-    CGFloat textX = pad + art + 12 * c;
+    CGFloat textX = self.expandedArtwork ? pad + 4 * c : pad + art + 12 * c;
     CGFloat controlsWidth = 110 * c;
     CGFloat textW = MAX(50 * c, w - textX - controlsWidth - 12 * c);
     self.titleLabel.frame = CGRectMake(textX, h / 2 - 20 * c + verticalShift, textW, 20 * c);

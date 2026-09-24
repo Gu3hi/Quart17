@@ -4,6 +4,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <UIKit/UIKit.h>
 #import <roothide.h>
+#import <notify.h>
 
 static NSString *QPrefsPath(void) {
     return @"/var/mobile/Library/Preferences/com.gushi.quart17.plist";
@@ -18,6 +19,23 @@ static void QWritePref(NSString *key, id value) {
                                      ?: [NSMutableDictionary dictionary];
     settings[key] = value;
     [settings writeToFile:QPrefsPath() atomically:YES];
+    if ([key isEqualToString:@"playerCornerRoundness"] ||
+        [key isEqualToString:@"largeArtworkScale"] ||
+        [key isEqualToString:@"largeArtworkRoundness"]) {
+        int token = -1;
+        if (notify_register_check("com.gushi.quart17/playercorner", &token) == NOTIFY_STATUS_OK) {
+            double corner = [settings[@"playerCornerRoundness"] ?: @1 doubleValue];
+            corner = isfinite(corner) ? MAX(0, MIN(1, corner)) : 1;
+            double scale = [settings[@"largeArtworkScale"] ?: @1 doubleValue];
+            scale = isfinite(scale) ? MAX(0.6, MIN(1, scale)) : 1;
+            double expandedCorner = [settings[@"largeArtworkRoundness"] ?: @(corner) doubleValue];
+            expandedCorner = isfinite(expandedCorner) ? MAX(0, MIN(1, expandedCorner)) : corner;
+            notify_set_state(token, ((uint64_t)llround(expandedCorner * 10000) << 48) |
+                ((uint64_t)llround(scale * 10000) << 32) |
+                0x51700000ULL | (uint64_t)llround(corner * 10000));
+            notify_cancel(token);
+        }
+    }
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          CFSTR("com.gushi.quart17/preferenceschanged"), NULL, NULL, YES);
 }
@@ -91,6 +109,8 @@ static void QWritePref(NSString *key, id value) {
         id legacy = QReadPref(@"roundArtwork", nil);
         raw = legacy && ![legacy boolValue] ? @0 : @1;
     }
+    if (!raw && [specifier.properties[@"key"] isEqualToString:@"largeArtworkRoundness"])
+        raw = QReadPref(@"playerCornerRoundness", @1);
     double v = [self rangeValue:raw ?: specifier.properties[@"default"]];
     self.qSlider.value = (float)v;
     BOOL scalingDisabled = [specifier.properties[@"key"] isEqualToString:@"widthScale"] &&
@@ -204,7 +224,10 @@ static void QWritePref(NSString *key, id value) {
             @"scaleBanners": @"rectangle.on.rectangle", @"glassBanners": @"sparkles.rectangle.stack",
             @"disableListScaling": @"arrow.up.left.and.arrow.down.right",
             @"playerEnabled": @"play.rectangle.fill",
+            @"playerAppearance": @"sparkles.rectangle.stack",
             @"playerCornerRoundness": @"square.on.circle",
+            @"largeArtworkScale": @"arrow.up.left.and.arrow.down.right",
+            @"largeArtworkRoundness": @"square.on.circle",
             @"showProgress": @"slider.horizontal.3", @"progressStyle": @"circle.dotted.circle",
             @"hideControls": @"eye.slash",
             @"hideRoute": @"airplay.audio", @"backgroundFromArtwork": @"paintpalette.fill",
@@ -215,7 +238,7 @@ static void QWritePref(NSString *key, id value) {
             @"启用插件": @"Enable Quart17", @"尺寸": @"Size", @"锁屏列表大小": @"Lock Screen list size",
             @"停用通知缩放": @"Disable notification scaling",
             @"缩放桌面横幅": @"Scale notification banners",
-            @"横幅与锁屏玻璃": @"Banner & Lock Screen glass",
+            @"通知与快捷按钮玻璃": @"Notifications & shortcuts glass",
             @"玻璃参数": @"Glass appearance",
             @"玻璃效果": @"Glass effect",
             @"通知外观": @"Notifications",
@@ -225,7 +248,10 @@ static void QWritePref(NSString *key, id value) {
             @"右侧双下滑清除": @"Double swipe down to clear",
             @"清除时轻震动": @"Light haptic on clear",
             @"锁屏播放器": @"Lock Screen Player", @"Quart 风格播放器": @"Quart style player",
-            @"播放器圆角": @"Player corner roundness",
+            @"播放器外观": @"Player appearance",
+            @"大封面大小": @"Expanded artwork size",
+            @"大封面圆角": @"Expanded artwork corners",
+            @"播放器与通知圆角": @"Player & notification corners",
             @"显示播放进度": @"Show playback progress",
             @"进度条样式": @"Progress style", @"隐藏控制按钮": @"Hide playback buttons",
             @"按钮图标目录": @"Button icon folder",
@@ -240,10 +266,13 @@ static void QWritePref(NSString *key, id value) {
         NSDictionary *englishFooters = @{
             @"关闭总开关会停用通知与锁屏播放器样式，并收起以下设置。": @"Turn off to disable both styles and collapse the options below.",
             @"锁屏列表大小控制锁屏通知；开启桌面横幅缩放后，弹出的横幅使用相同的大小。": @"Lock Screen list size controls Lock Screen notifications. Enable banner scaling to use the same size for incoming banners.",
+            @"锁屏列表大小控制通知宽度；圆角滑块同步调整播放器、通知卡片和测试横幅。开启桌面横幅缩放后，弹出的横幅使用相同的大小。": @"List size controls notification width. The shared corner slider adjusts the player, notification cards, and test banner. Enable banner scaling to use the same size for incoming banners.",
             @"调整通知卡片的文字和图标；锁屏通知固定使用深色外观以避免折叠黑块。": @"Adjust notification text and icons. Lock Screen cards keep a dark appearance to prevent black folded stacks.",
             @"进入玻璃参数可一边拖动滑块，一边查看常驻测试横幅。": @"Open Glass appearance to adjust the sliders while viewing a persistent test banner.",
             @"从右半屏空白处连续两次下滑清除普通通知；滚动列表不会计入。保留音乐控件和实时活动；左半屏下滑打开系统搜索。": @"Swipe down twice from empty space on the right half to clear ordinary notifications. Scrolling the list does not count. Media controls and Live Activities stay; swiping down on the left opens system Search.",
             @"三种进度样式只能选择一种。点右上角“刷新”可更新样式，不会中断音频。": @"Choose one of three progress styles. Refresh updates the style without interrupting audio.",
+            @"外观可选 Quart 原风格或液态玻璃；玻璃参数与通知共用。三种进度样式只能选择一种。点右上角“刷新”不会中断音频。": @"Choose Quart original or Liquid Glass. The player shares the notification glass controls. Choose one progress style; Refresh keeps audio playing.",
+            @"大封面与环绕进度条一起缩放；大封面圆角可单独调整。点击封面展开或收起，展开后可横滑播放器调整进度；点击歌名打开播放 App。": @"Expanded artwork and its progress ring scale together. Adjust expanded artwork corners separately. Tap the cover to expand or collapse it, swipe the player to seek while expanded, or tap the title to open the playing app.",
             @"为每首歌从封面提取颜色。关闭某项后，该项使用固定配色。": @"Pick colors from each song's artwork. Disabled items use fixed colors.",
             @"致敬 @LaughingQuoll\n永远怀念最好的开发者。": @"In tribute to @LaughingQuoll\nForever remembering the best developer."
         };
@@ -255,6 +284,9 @@ static void QWritePref(NSString *key, id value) {
             if (!self.isChinese) {
                 if ([key isEqualToString:@"progressStyle"]) {
                     [specifier setProperty:@[@"Background", @"Bottom", @"Artwork ring"] forKey:@"validTitles"];
+                }
+                if ([key isEqualToString:@"playerAppearance"]) {
+                    [specifier setProperty:@[@"Quart original", @"Liquid Glass"] forKey:@"validTitles"];
                 }
                 NSString *translatedName = english[specifier.name];
                 if (translatedName) specifier.name = translatedName;
@@ -320,6 +352,8 @@ static void QWritePref(NSString *key, id value) {
     if ([specifier.properties[@"key"] isEqualToString:@"playerCornerRoundness"] && !settings[@"playerCornerRoundness"]) {
         return settings[@"roundArtwork"] && ![settings[@"roundArtwork"] boolValue] ? @0 : @1;
     }
+    if ([specifier.properties[@"key"] isEqualToString:@"largeArtworkRoundness"] && !settings[@"largeArtworkRoundness"])
+        return settings[@"playerCornerRoundness"] ?: @1;
     return settings[specifier.properties[@"key"]] ?: specifier.properties[@"default"];
 }
 
