@@ -104,6 +104,7 @@ static void QLoadSettings(void) {
                     @"showNotificationCount": @YES,
                     @"playerAppearance": @0,
                     @"glassBlur": @8, @"glassRefraction": @12, @"glassHighlight": @0.5,
+                    @"desktopVeil": @28, @"lockVeil": @28,
                     @"clearAllEnabled": @YES, @"clearHapticEnabled": @YES,
                     @"showProgress": @YES, @"backgroundProgress": @YES, @"hideRoute": @YES,
                     @"hideControls": @NO,
@@ -329,7 +330,16 @@ static UIColor *QAdaptiveGlassTextColor(void) {
     return color;
 }
 
+static const void *QNativeLumKey = &QNativeLumKey;
+
 static CGFloat QColorLuminance(UIColor *color) {
+    if (!color) return -1;
+    // Resolve dynamic colors (native label colors are often dynamic).
+    @try {
+        if ([color respondsToSelector:@selector(resolvedColorWithTraitCollection:)]) {
+            color = [color resolvedColorWithTraitCollection:UIScreen.mainScreen.traitCollection];
+        }
+    } @catch (...) {}
     CGFloat r = 0, g = 0, b = 0, a = 0;
     if ([color getRed:&r green:&g blue:&b alpha:&a]) return 0.2126 * r + 0.7152 * g + 0.0722 * b;
     CGFloat w = 0;
@@ -360,6 +370,9 @@ static UIColor *QContrastTextColor(UIView *root) {
     return nil;
 }
 
+// Sample the status bar window's actual pixels. The status bar shows
+// text/icons in white (dark bg) or black (light bg). Returns the matching
+// banner style, or Unspecified if unknown.
 static void QSetLockNotificationAppearance(UIView *root, UIUserInterfaceStyle style) {
     NSNumber *original = objc_getAssociatedObject(root, QLockOriginalInterfaceStyleKey);
     if (style != UIUserInterfaceStyleUnspecified) {
@@ -684,9 +697,18 @@ static void QApplyGlassSurface(UIView *root, UIView *material, BOOL quickAction)
         objc_setAssociatedObject(glass, QBannerGlassStyleKey, styleNumber, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     glass.alpha = 1;
-    // A very light neutral veil diffuses busy wallpaper without hiding it.
-    glass.contentView.backgroundColor = dark ? [UIColor colorWithWhite:0.35 alpha:0.10] :
-        [UIColor colorWithWhite:1 alpha:0.07];
+    // The veil ensures text readability on any background. It follows the
+    // mode (dark veil in dark mode, light veil in light mode) with enough
+    // opacity to guarantee contrast, while still showing the blurred
+    // background through. This is how system materials stay legible.
+    // Desktop and lock screen veils are user-adjustable separately
+    // (desktopVeil / lockVeil, 0-30, real-time).
+    CGFloat veilPct = lockNotification ? [qSettings[@"lockVeil"] doubleValue]
+                                       : [qSettings[@"desktopVeil"] doubleValue];
+    veilPct = isfinite(veilPct) ? MAX(0, MIN(30, veilPct)) : 28;
+    CGFloat veil = veilPct / 100.0;
+    glass.contentView.backgroundColor = dark ? [UIColor colorWithWhite:0 alpha:veil] :
+        [UIColor colorWithWhite:1 alpha:veil];
     glass.frame = material.frame;
     glass.autoresizingMask = material.autoresizingMask;
     CALayer *backdrop = objc_getAssociatedObject(glass, QBannerGlassBackdropKey);
@@ -778,6 +800,8 @@ static NSArray<UIView *> *QStackSiblings(UIView *root) {
     if (!container || !root.window) return siblings;
     CGRect rootFrame = [root convertRect:root.bounds toView:container];
     if (CGRectIsNull(rootFrame) || CGRectIsEmpty(rootFrame)) return siblings;
+    CGFloat rootArea = rootFrame.size.width * rootFrame.size.height;
+    if (rootArea <= 0) return siblings;
     for (UIView *other in qActiveNotifications) {
         if (other == root || !other.window) continue;
         BOOL sameContainer = NO;
@@ -786,7 +810,12 @@ static NSArray<UIView *> *QStackSiblings(UIView *root) {
         }
         if (!sameContainer) continue;
         CGRect otherFrame = [other convertRect:other.bounds toView:container];
-        if (!CGRectIsNull(otherFrame) && CGRectIntersectsRect(rootFrame, otherFrame))
+        if (CGRectIsNull(otherFrame) || CGRectIsEmpty(otherFrame)) continue;
+        // 要求显著重叠（>60%）才算堆叠，避免滚动时轻微交错误判为折叠
+        CGRect inter = CGRectIntersection(rootFrame, otherFrame);
+        if (CGRectIsNull(inter) || CGRectIsEmpty(inter)) continue;
+        CGFloat interArea = inter.size.width * inter.size.height;
+        if (interArea > rootArea * 0.6)
             [siblings addObject:other];
     }
     return siblings;
@@ -1036,18 +1065,26 @@ static void QUpdateStackState(UIView *root) {
     // count badge on the top card; the glass effect itself is no longer
     // gated by it (rolled back to pre-2.2.6: every card gets glass).
     BOOL front = YES;
+    BOOL hasFoldedBehind = NO;  // 折叠堆叠：后面有缩小卡片；展开时所有卡片等大
     for (UIView *sibling in siblings) {
         CGRect f = [sibling convertRect:sibling.bounds toView:container];
         CGFloat area = f.size.width * f.size.height;
+        // 后面有明显缩小的卡片（>5%）才算折叠状态，避免滚动动画误判
+        if (area < rootArea * 0.95 && !QIsViewInFrontOf(sibling, root)) hasFoldedBehind = YES;
+        // 兄弟卡片在视觉上位于本卡前面 → 本卡不是最上层
+        if (QIsViewInFrontOf(sibling, root)) { front = NO; break; }
+        // 兄弟卡片明显更大 → 本卡不是最上层（折叠堆叠的顶层卡）
         if (area > rootArea * 1.02) { front = NO; break; }
-        if (fabs(area - rootArea) <= rootArea * 0.02 && QIsViewInFrontOf(sibling, root)) { front = NO; break; }
     }
+    // 展开时不显示计数徽标：只有折叠堆叠（后面有缩小卡片）才显示
+    if (!hasFoldedBehind) front = NO;
     // Only a real (overlapping) stack uses the model count; a lone card is
     // always 1 even if its cell hosts other requests.
+    // 模型计数只在确认折叠时使用，展开时不用（避免展开后仍显示错误计数）。
     NSInteger count = 1;
     NSInteger cellCount = 0, tableCount = 0, masterCount = 0;
     NSString *stackKey = nil;
-    if (siblings.count) {
+    if (siblings.count && hasFoldedBehind) {
         cellCount = QStackCount(root, siblings);
         count = cellCount;
         // The overlap walk under-reports once the system detaches hidden
@@ -1060,6 +1097,22 @@ static void QUpdateStackState(UIView *root) {
             if (tableCount > count) count = tableCount;
             masterCount = QMasterListStackCount(stackKey, container);
             if (masterCount > count) count = masterCount;
+            // 可见视图数 >= 模型总数 → 所有通知都可见 = 展开状态，不显示徽标
+            // 折叠时系统只渲染约3层，可见数 < 总数，才显示计数
+            if (masterCount > 0 && tableCount >= masterCount) {
+                front = NO;
+            }
+        }
+    }
+    // 互斥：同一堆叠只允许最上层卡片显示徽标。如果本卡是 front，
+    // 先清除所有兄弟卡片的徽标，防止时序问题导致徽标出现在第二张卡上。
+    if (front && count > 1) {
+        for (UIView *sibling in siblings) {
+            UILabel *sibBadge = objc_getAssociatedObject(sibling, QCountBadgeKey);
+            if (sibBadge) {
+                [sibBadge removeFromSuperview];
+                objc_setAssociatedObject(sibling, QCountBadgeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
         }
     }
     QUpdateCountBadge(root, count, front);
@@ -1275,6 +1328,33 @@ static void QStyleActionButton(UIView *button) {
         [lqueue addObjectsFromArray:view.subviews];
     }
     QApplyGlassSurface(button, material, YES);
+    // The "选项" / "清除" pills follow the notification corner radius slider.
+    // (The lock screen quick actions and X buttons keep their native shape.)
+    UIVisualEffectView *actionGlass = objc_getAssociatedObject(material, QBannerGlassKey);
+    if (actionGlass) {
+        CGFloat actionRadius = QSharedCornerRadius(MIN(button.bounds.size.width, button.bounds.size.height));
+        // Sync the button itself so its clipping matches the glass.
+        button.layer.cornerRadius = actionRadius;
+        button.layer.cornerCurve = kCACornerCurveCircular;
+        button.clipsToBounds = YES;
+        actionGlass.layer.cornerRadius = actionRadius;
+        // Clip the glass so the veil/sheen don't overflow the rounded corners.
+        actionGlass.clipsToBounds = YES;
+        CALayer *actionRimMask = objc_getAssociatedObject(actionGlass, QBannerGlassRimMaskKey);
+        if (actionRimMask) {
+            CGFloat actionInset = actionRimMask.borderWidth / 2;
+            actionRimMask.frame = CGRectInset(actionGlass.bounds, actionInset, actionInset);
+            actionRimMask.cornerRadius = MAX(0, actionRadius - actionInset);
+        }
+        // Rebuild the edge refraction with the new radius.
+        CALayer *actionBackdrop = objc_getAssociatedObject(actionGlass, QBannerGlassBackdropKey);
+        if (actionBackdrop) {
+            CGFloat actionRefraction = [qSettings[@"glassRefraction"] doubleValue];
+            actionRefraction = isfinite(actionRefraction) ? MAX(0, MIN(24, actionRefraction)) : 12;
+            QUpdateGlassRefraction(actionBackdrop, actionGlass.bounds.size, actionRadius,
+                                   actionRefraction * 0.65, actionGlass);
+        }
+    }
     for (UIView *label in labels) [button bringSubviewToFront:label];
 }
 
@@ -1410,8 +1490,13 @@ static void QStyle(UIView *root) {
             break;
         }
     }
-    QSetLockNotificationAppearance(appearanceRoot,
-        stylingEnabled && lockNotification ? UIUserInterfaceStyleDark : UIUserInterfaceStyleUnspecified);
+    UIUserInterfaceStyle bannerStyle = UIUserInterfaceStyleUnspecified;
+    if (stylingEnabled && lockNotification) {
+        bannerStyle = UIUserInterfaceStyleDark;
+    }
+    // Desktop banners: text color is set explicitly from the status bar
+    // (see explicitDesktopTextColor above), so no appearance override.
+    QSetLockNotificationAppearance(appearanceRoot, bannerStyle);
     [qActiveNotifications addObject:root];
     QUpdateStackState(root);
     QRestoreStyle(root);
@@ -1453,13 +1538,31 @@ static void QStyle(UIView *root) {
                 label.textColor = UIColor.whiteColor;
             } else if ([qSettings[@"glassBanners"] boolValue] &&
                        (QIsLockScreenNotification(root) || QIsDesktopBanner(root))) {
-                label.textColor = QAdaptiveGlassTextColor();
+                // Follow the native text color: the system already chose it
+                // for the current context (light mode = black text, dark
+                // mode = white text). Cache the native luminance so
+                // re-styling doesn't read back our own override.
+                NSNumber *saved = objc_getAssociatedObject(label, QNativeLumKey);
+                CGFloat nativeLum = saved ? saved.doubleValue : -1;
+                if (!saved) {
+                    nativeLum = QColorLuminance(label.textColor);
+                    objc_setAssociatedObject(label, QNativeLumKey, @(nativeLum),
+                        OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                }
+                if (nativeLum >= 0) {
+                    label.textColor = nativeLum > 0.5 ? UIColor.whiteColor
+                                                     : UIColor.blackColor;
+                } else {
+                    label.textColor = QAdaptiveGlassTextColor();
+                }
             }
             if ([qSettings[@"autoContrastText"] boolValue] && material &&
                 objc_getAssociatedObject(material, QBannerGlassKey)) {
                 UIColor *contrast = QContrastTextColor(root);
                 if (contrast) label.textColor = contrast;
             }
+            // Clear any shadow left over from earlier builds.
+            label.layer.shadowOpacity = 0;
         }
         NSString *name = NSStringFromClass(view.class);
         BOOL iconClass = [name containsString:@"IconView"];

@@ -181,6 +181,14 @@ static void QWritePref(NSString *key, id value) {
     return [[NSLocale.preferredLanguages.firstObject lowercaseString] hasPrefix:@"zh"];
 }
 
+- (NSString *)qPlistName {
+    NSString *detail = self.specifier.properties[@"detail"];
+    if ([detail isEqualToString:@"QNotifications"] || [detail isEqualToString:@"QPlayer"]) {
+        return detail;
+    }
+    return @"Root";
+}
+
 - (NSString *)localized:(NSString *)chinese english:(NSString *)english {
     return self.isChinese ? chinese : english;
 }
@@ -213,9 +221,7 @@ static void QWritePref(NSString *key, id value) {
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-- (NSArray *)specifiers {
-    if (!self.allQuartSpecifiers) {
-        self.allQuartSpecifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
+- (void)qApplyIconsAndTranslations:(NSArray<PSSpecifier *> *)specifiers {
         NSDictionary *symbols = @{
             @"masterEnabled": @"power", @"enabled": @"bell.badge", @"darkCards": @"moon.fill",
             @"roundIcons": @"app.fill", @"clearAllEnabled": @"arrow.down.to.line",
@@ -234,7 +240,8 @@ static void QWritePref(NSString *key, id value) {
             @"titleFromArtwork": @"textformat", @"artistFromArtwork": @"person.fill",
             @"progressFromArtwork": @"line.diagonal",
             @"autoContrastText": @"circle.lefthalf.filled",
-            @"showNotificationCount": @"number.circle"
+            @"showNotificationCount": @"number.circle",
+            @"notificationsLink": @"bell.badge", @"playerLink": @"play.rectangle.fill"
         };
         NSDictionary *english = @{
             @"启用插件": @"Enable Quart17", @"尺寸": @"Size", @"锁屏列表大小": @"Lock Screen list size",
@@ -265,7 +272,11 @@ static void QWritePref(NSString *key, id value) {
             @"播放进度": @"Playback progress", @"关于": @"About",
             @"作者 @Put_Story": @"Author @Put_Story",
             @"致敬 @LaughingQuoll": @"Tribute to @LaughingQuoll",
-            @"开源项目": @"Source code"
+            @"开源项目": @"Source code",
+            @"通知设置": @"Notifications",
+            @"通知样式": @"Notification Style", @"尺寸与圆角": @"Size & Corners",
+            @"进度条": @"Progress Bar", @"控制按钮": @"Controls",
+            @"播放器": @"Player", @"功能": @"Features"
         };
         NSDictionary *englishFooters = @{
             @"关闭总开关会停用通知与锁屏播放器样式，并收起以下设置。": @"Turn off to disable both styles and collapse the options below.",
@@ -280,7 +291,7 @@ static void QWritePref(NSString *key, id value) {
             @"为每首歌从封面提取颜色。关闭某项后，该项使用固定配色。": @"Pick colors from each song's artwork. Disabled items use fixed colors.",
             @"致敬 @LaughingQuoll\n永远怀念最好的开发者。": @"In tribute to @LaughingQuoll\nForever remembering the best developer."
         };
-        for (PSSpecifier *specifier in self.allQuartSpecifiers) {
+        for (PSSpecifier *specifier in specifiers) {
             NSString *key = specifier.properties[@"key"];
             NSString *symbol = key ? symbols[key] : nil;
             UIImage *icon = symbol ? [UIImage systemImageNamed:symbol] : nil;
@@ -298,12 +309,24 @@ static void QWritePref(NSString *key, id value) {
                 if (footer && englishFooters[footer]) [specifier setProperty:englishFooters[footer] forKey:@"footerText"];
             }
         }
+}
+
+- (NSArray *)specifiers {
+    if (!self.allQuartSpecifiers) {
+        self.allQuartSpecifiers = [self loadSpecifiersFromPlistName:[self qPlistName] target:self];
+        [self qApplyIconsAndTranslations:self.allQuartSpecifiers];
     }
     if (!_specifiers) {
-        BOOL active = [[self readPreferenceValue:self.allQuartSpecifiers[1]] boolValue];
-        NSArray *visible = active ? self.allQuartSpecifiers :
-            [self.allQuartSpecifiers subarrayWithRange:NSMakeRange(0, MIN(2, self.allQuartSpecifiers.count))];
-        _specifiers = [visible mutableCopy];
+        // Sub-pages (QNotifications, QPlayer) show all items; only Root does master-switch filtering
+        NSString *plist = [self qPlistName];
+        if ([plist isEqualToString:@"QNotifications"] || [plist isEqualToString:@"QPlayer"]) {
+            _specifiers = [self.allQuartSpecifiers mutableCopy];
+        } else {
+            BOOL active = [[self readPreferenceValue:self.allQuartSpecifiers[1]] boolValue];
+            NSArray *visible = active ? self.allQuartSpecifiers :
+                [self.allQuartSpecifiers subarrayWithRange:NSMakeRange(0, MIN(2, self.allQuartSpecifiers.count))];
+            _specifiers = [visible mutableCopy];
+        }
     }
     return _specifiers;
 }
@@ -332,6 +355,18 @@ static void QWritePref(NSString *key, id value) {
 
 - (void)openGlassSettings:(id)sender {
     Class controllerClass = NSClassFromString(@"QGlassListController");
+    UIViewController *controller = [[controllerClass alloc] init];
+    [self.navigationController pushViewController:controller animated:YES];
+}
+
+- (void)openNotificationsSettings:(id)sender {
+    Class controllerClass = NSClassFromString(@"QNotificationsListController");
+    UIViewController *controller = [[controllerClass alloc] init];
+    [self.navigationController pushViewController:controller animated:YES];
+}
+
+- (void)openPlayerSettings:(id)sender {
+    Class controllerClass = NSClassFromString(@"QPlayerListController");
     UIViewController *controller = [[controllerClass alloc] init];
     [self.navigationController pushViewController:controller animated:YES];
 }
@@ -412,6 +447,91 @@ static void QWritePref(NSString *key, id value) {
 - (void)hideTestNotification:(id)sender {
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
         CFSTR("com.gushi.quart17/hidetestnotification"), NULL, NULL, YES);
+}
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    PSSpecifier *specifier = [self specifierAtIndexPath:indexPath];
+    id cellClass = specifier.properties[@"cellClass"];
+    if ([cellClass isKindOfClass:NSString.class] && [cellClass isEqualToString:@"QWidthSliderCell"])
+        return 88.0;
+    if (cellClass == NSClassFromString(@"QWidthSliderCell")) return 88.0;
+    return [super tableView:tableView heightForRowAtIndexPath:indexPath];
+}
+- (id)readPreferenceValue:(PSSpecifier *)specifier {
+    return QReadPref(specifier.properties[@"key"], specifier.properties[@"default"]);
+}
+- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
+    QWritePref(specifier.properties[@"key"], value);
+}
+@end
+
+@interface QNotificationsListController : PSListController
+@end
+
+@implementation QNotificationsListController
+- (BOOL)qIsChinese {
+    return [[NSLocale.preferredLanguages.firstObject lowercaseString] hasPrefix:@"zh"];
+}
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = [self qIsChinese] ? @"通知设置" : @"Notifications";
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
+        initWithTitle:[self qIsChinese] ? @"刷新" : @"Refresh"
+        style:UIBarButtonItemStylePlain target:self action:@selector(qRespring:)];
+}
+- (void)qRespring:(id)sender {
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.gushi.quart17/preferenceschanged"), NULL, NULL, YES);
+}
+- (NSArray *)specifiers {
+    if (!_specifiers) {
+        _specifiers = [[self loadSpecifiersFromPlistName:@"NSettings" target:self] mutableCopy];
+    }
+    return _specifiers;
+}
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    PSSpecifier *specifier = [self specifierAtIndexPath:indexPath];
+    id cellClass = specifier.properties[@"cellClass"];
+    if ([cellClass isKindOfClass:NSString.class] && [cellClass isEqualToString:@"QWidthSliderCell"])
+        return 88.0;
+    if (cellClass == NSClassFromString(@"QWidthSliderCell")) return 88.0;
+    return [super tableView:tableView heightForRowAtIndexPath:indexPath];
+}
+- (id)readPreferenceValue:(PSSpecifier *)specifier {
+    return QReadPref(specifier.properties[@"key"], specifier.properties[@"default"]);
+}
+- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
+    QWritePref(specifier.properties[@"key"], value);
+}
+- (void)openGlassSettings:(id)sender {
+    Class controllerClass = NSClassFromString(@"QGlassListController");
+    UIViewController *controller = [[controllerClass alloc] init];
+    [self.navigationController pushViewController:controller animated:YES];
+}
+@end
+
+@interface QPlayerListController : PSListController
+@end
+
+@implementation QPlayerListController
+- (BOOL)qIsChinese {
+    return [[NSLocale.preferredLanguages.firstObject lowercaseString] hasPrefix:@"zh"];
+}
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = [self qIsChinese] ? @"锁屏播放器" : @"Lock Screen Player";
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
+        initWithTitle:[self qIsChinese] ? @"刷新" : @"Refresh"
+        style:UIBarButtonItemStylePlain target:self action:@selector(qRespring:)];
+}
+- (void)qRespring:(id)sender {
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.gushi.quart17/preferenceschanged"), NULL, NULL, YES);
+}
+- (NSArray *)specifiers {
+    if (!_specifiers) {
+        _specifiers = [[self loadSpecifiersFromPlistName:@"PSettings" target:self] mutableCopy];
+    }
+    return _specifiers;
 }
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
     PSSpecifier *specifier = [self specifierAtIndexPath:indexPath];
