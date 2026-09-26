@@ -232,7 +232,9 @@ static void QWritePref(NSString *key, id value) {
             @"hideControls": @"eye.slash",
             @"hideRoute": @"airplay.audio", @"backgroundFromArtwork": @"paintpalette.fill",
             @"titleFromArtwork": @"textformat", @"artistFromArtwork": @"person.fill",
-            @"progressFromArtwork": @"line.diagonal"
+            @"progressFromArtwork": @"line.diagonal",
+            @"autoContrastText": @"circle.lefthalf.filled",
+            @"showNotificationCount": @"number.circle"
         };
         NSDictionary *english = @{
             @"启用插件": @"Enable Quart17", @"尺寸": @"Size", @"锁屏列表大小": @"Lock Screen list size",
@@ -243,6 +245,8 @@ static void QWritePref(NSString *key, id value) {
             @"玻璃效果": @"Glass effect",
             @"通知外观": @"Notifications",
             @"启用通知样式": @"Enable notification style", @"深色卡片": @"Dark cards",
+            @"文字自适应反色": @"Auto contrast text",
+            @"通知计数": @"Notification count",
             @"圆形应用图标": @"Round app icons",
             @"锁屏手势": @"Lock Screen gestures",
             @"右侧双下滑清除": @"Double swipe down to clear",

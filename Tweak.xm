@@ -29,11 +29,13 @@ static void *QOriginalStyleKey = &QOriginalStyleKey;
 static void *QOwnLayerTransformKey = &QOwnLayerTransformKey;
 static void *QOriginalLayerTransformKey = &QOriginalLayerTransformKey;
 static void *QScalePendingKey = &QScalePendingKey;
+static void *QScaleRetryKey = &QScaleRetryKey;
 static void *QOriginalIndicatorKey = &QOriginalIndicatorKey;
 static void *QBannerOriginalTransformKey = &QBannerOriginalTransformKey;
 static void *QBannerOwnedTransformKey = &QBannerOwnedTransformKey;
 static void *QBannerShadowHiddenKey = &QBannerShadowHiddenKey;
 static void *QBannerGlassKey = &QBannerGlassKey;
+static void *QToggleGlassProxyKey = &QToggleGlassProxyKey;
 static void *QBannerGlassSheenKey = &QBannerGlassSheenKey;
 static void *QBannerGlassRimKey = &QBannerGlassRimKey;
 static void *QBannerGlassRimMaskKey = &QBannerGlassRimMaskKey;
@@ -44,6 +46,22 @@ static void *QBannerGlassStyleKey = &QBannerGlassStyleKey;
 static void *QBannerGlassCompatibilityKey = &QBannerGlassCompatibilityKey;
 static void *QLockGlassShadowHiddenKey = &QLockGlassShadowHiddenKey;
 static void *QLockOriginalInterfaceStyleKey = &QLockOriginalInterfaceStyleKey;
+static void *QCountBadgeKey = &QCountBadgeKey;
+static void *QStackKeyKey = &QStackKeyKey;
+static void *QRequestKey = &QRequestKey;
+
+// Try several KVC keys; returns the first non-nil value and reports which key hit.
+static id QTryKVCKeys(id obj, NSArray<NSString *> *keys, NSString **hitKeyOut) {
+    for (NSString *k in keys) {
+        id v = nil;
+        @try { v = [obj valueForKey:k]; } @catch (NSException *e) { v = nil; }
+        if (v && v != (id)[NSNull null]) {
+            if (hitKeyOut) *hitKeyOut = k;
+            return v;
+        }
+    }
+    return nil;
+}
 static __weak id qMasterList;
 static CFAbsoluteTime qLastRightSwipe;
 static void *QSearchPanInstalledKey = &QSearchPanInstalledKey;
@@ -60,7 +78,7 @@ static CGFloat QSharedCornerRadius(CGFloat height) {
     return MAX(0, height) * roundness / 2;
 }
 static CGFloat QShrinkScale(void);
-static void QApplyListScaling(UIView *list);
+static BOOL QApplyListScaling(UIView *list);
 static void QScheduleListScaling(UIView *list);
 static void QClearOwnLayerTransform(UIView *list);
 static void QApplyBannerScaling(UIView *banner);
@@ -79,9 +97,11 @@ static void QHideTestBanner(void);
 static void QLoadSettings(void) {
     NSDictionary *saved = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.gushi.quart17.plist"];
     qSettings = [@{ @"masterEnabled": @YES, @"enabled": @YES, @"darkCards": @NO,
+                    @"autoContrastText": @YES,
                     @"roundIcons": @YES,
                     @"playerEnabled": @YES, @"disableListScaling": @NO,
                     @"scaleBanners": @NO, @"glassBanners": @NO,
+                    @"showNotificationCount": @YES,
                     @"playerAppearance": @0,
                     @"glassBlur": @8, @"glassRefraction": @12, @"glassHighlight": @0.5,
                     @"clearAllEnabled": @YES, @"clearHapticEnabled": @YES,
@@ -309,6 +329,37 @@ static UIColor *QAdaptiveGlassTextColor(void) {
     return color;
 }
 
+static CGFloat QColorLuminance(UIColor *color) {
+    CGFloat r = 0, g = 0, b = 0, a = 0;
+    if ([color getRed:&r green:&g blue:&b alpha:&a]) return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    CGFloat w = 0;
+    if ([color getWhite:&w alpha:&a]) return w;
+    return -1;
+}
+
+static UIColor *QContrastTextColor(UIView *root) {
+    for (UIView *ancestor = root; ancestor; ancestor = ancestor.superview) {
+        id settings = nil;
+        for (NSString *name in @[@"_legibilitySettings", @"legibilitySettings"]) {
+            SEL selector = NSSelectorFromString(name);
+            if (![ancestor respondsToSelector:selector]) continue;
+            settings = ((id (*)(id, SEL))objc_msgSend)(ancestor, selector);
+            if (settings) break;
+        }
+        if (![settings isKindOfClass:NSObject.class]) continue;
+        for (NSString *key in @[@"contentColor", @"primaryColor", @"secondaryColor"]) {
+            id value = nil;
+            @try { value = [settings valueForKey:key]; }
+            @catch (NSException *exception) { value = nil; }
+            if (![value isKindOfClass:UIColor.class]) continue;
+            CGFloat luminance = QColorLuminance(value);
+            if (luminance < 0) continue;
+            return luminance > 0.5 ? UIColor.whiteColor : UIColor.blackColor;
+        }
+    }
+    return nil;
+}
+
 static void QSetLockNotificationAppearance(UIView *root, UIUserInterfaceStyle style) {
     NSNumber *original = objc_getAssociatedObject(root, QLockOriginalInterfaceStyleKey);
     if (style != UIUserInterfaceStyleUnspecified) {
@@ -351,8 +402,6 @@ static CGFloat QGlassSDF(CGFloat x, CGFloat y, CGSize size, CGFloat radius) {
     return hypot(MAX(qx, 0), MAX(qy, 0)) + MIN(MAX(qx, qy), 0) - radius;
 }
 
-// Match Burger Swift's edge displacement curve without changing the setting's
-// meaning: the refraction slider still supplies the displacement in points.
 static CGFloat QGlassBezier(CGFloat value) {
     const CGFloat x1 = 0.816137566137566, y1 = 0.20502645502645533;
     const CGFloat x2 = 0.5806878306878306, y2 = 0.873015873015873;
@@ -434,8 +483,6 @@ extern "C" void QUpdateGlassRefraction(CALayer *backdrop, CGSize size, CGFloat r
         for (NSNumber *number in oldY) ys.push_back(number.doubleValue);
         addGrid(xs, ys);
     } else {
-        // Straight strips use radial samples that meet the quarter-circle rings
-        // at the same coordinates, keeping the mesh continuous at each corner.
         std::vector<CGFloat> depths = {0};
         for (int i = 1; i < 12; i++) depths.push_back(r * i / 12);
         depths.push_back(r);
@@ -685,6 +732,360 @@ static void QApplyGlassSurface(UIView *root, UIView *material, BOOL quickAction)
     material.hidden = YES;
 }
 
+// Folded-stack support for the count badge: find the notification views that
+// belong to the same stack by overlap. Scope is the nearest
+// NCNotificationListView: stacked cards may live in one shared cell or in
+// separate cells under the same list view. Overlap is the real filter, so
+// widening the scope cannot merge unrelated cards. (The front-only glass
+// experiment was rolled back: every card gets glass, as before 2.2.6.)
+static UIView *QStackContainer(UIView *view) {
+    UIView *cell = nil;
+    for (UIView *ancestor = view.superview; ancestor && ![ancestor isKindOfClass:UIWindow.class];
+         ancestor = ancestor.superview) {
+        NSString *name = NSStringFromClass(ancestor.class);
+        if ([name isEqualToString:@"NCNotificationListView"]) return ancestor;
+        if (!cell && [name isEqualToString:@"NCNotificationListCell"]) cell = ancestor;
+    }
+    return cell;
+}
+
+static BOOL QIsViewInFrontOf(UIView *upper, UIView *lower) {
+    if (!upper || !lower || upper == lower) return NO;
+    NSMutableArray<UIView *> *upperChain = [NSMutableArray array];
+    for (UIView *a = upper; a; a = a.superview) [upperChain addObject:a];
+    NSSet *upperSet = [NSSet setWithArray:upperChain];
+    UIView *lca = nil;
+    UIView *lowerChild = nil;
+    for (UIView *a = lower; a; a = a.superview) {
+        if ([upperSet containsObject:a]) { lca = a; break; }
+        lowerChild = a;
+    }
+    if (!lca || !lowerChild) return NO;
+    UIView *upperChild = nil;
+    for (UIView *a = upper; a && a != lca; a = a.superview) upperChild = a;
+    if (!upperChild || upperChild == lowerChild) return NO;
+    NSUInteger ui = [lca.subviews indexOfObject:upperChild];
+    NSUInteger li = [lca.subviews indexOfObject:lowerChild];
+    return ui != NSNotFound && li != NSNotFound && ui > li;
+}
+
+// Styled notification views in the same list container whose frames overlap
+// root's frame: the folded stack around this card. Empty when the card stands
+// alone (banner, expanded list, single notification).
+static NSArray<UIView *> *QStackSiblings(UIView *root) {
+    NSMutableArray<UIView *> *siblings = [NSMutableArray array];
+    UIView *container = QStackContainer(root);
+    if (!container || !root.window) return siblings;
+    CGRect rootFrame = [root convertRect:root.bounds toView:container];
+    if (CGRectIsNull(rootFrame) || CGRectIsEmpty(rootFrame)) return siblings;
+    for (UIView *other in qActiveNotifications) {
+        if (other == root || !other.window) continue;
+        BOOL sameContainer = NO;
+        for (UIView *a = other; a && ![a isKindOfClass:UIWindow.class]; a = a.superview) {
+            if (a == container) { sameContainer = YES; break; }
+        }
+        if (!sameContainer) continue;
+        CGRect otherFrame = [other convertRect:other.bounds toView:container];
+        if (!CGRectIsNull(otherFrame) && CGRectIntersectsRect(rootFrame, otherFrame))
+            [siblings addObject:other];
+    }
+    return siblings;
+}
+
+static UIView *QNotificationAppIcon(UIView *root) {
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:root];
+    while (queue.count) {
+        UIView *view = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        // Only skip the badge itself (marked @YES). Root also carries this key
+        // (it points at the badge view) and must still be traversed.
+        if ([objc_getAssociatedObject(view, QCountBadgeKey) isEqual:@YES]) continue;
+        NSString *name = NSStringFromClass(view.class);
+        BOOL iconClass = [name containsString:@"IconView"];
+        BOOL smallImage = [view isKindOfClass:UIImageView.class] && ((UIImageView *)view).image != nil;
+        CGSize size = view.bounds.size;
+        BOOL isIcon = smallImage ||
+            (iconClass && view.subviews.count == 0 && ![name containsString:@"Badged"]);
+        if (isIcon && size.width >= 24 && size.width <= 80 && fabs(size.width - size.height) < 5) {
+            CGRect position = [view convertRect:view.bounds toView:root];
+            if (position.origin.x < 105) return view;
+        }
+        [queue addObjectsFromArray:view.subviews];
+    }
+    return nil;
+}
+
+static void QUpdateCountBadge(UIView *root, NSInteger count, BOOL front) {
+    UILabel *badge = objc_getAssociatedObject(root, QCountBadgeKey);
+    BOOL stylingOn = [qSettings[@"masterEnabled"] boolValue] && [qSettings[@"enabled"] boolValue];
+    BOOL show = stylingOn && [qSettings[@"showNotificationCount"] boolValue] &&
+        front && count > 1 && root.window != nil;
+    if (!show) {
+        [badge removeFromSuperview];
+        if (badge) objc_setAssociatedObject(root, QCountBadgeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+    if (!badge) {
+        badge = [[UILabel alloc] init];
+        badge.textAlignment = NSTextAlignmentCenter;
+        badge.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+        badge.textColor = [UIColor colorWithWhite:0.16 alpha:1];
+        badge.backgroundColor = [UIColor colorWithWhite:1 alpha:0.94];
+        badge.layer.masksToBounds = YES;
+        badge.userInteractionEnabled = NO;
+        // Marked so QStyle's label pass leaves it alone.
+        objc_setAssociatedObject(badge, QCountBadgeKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(root, QCountBadgeKey, badge, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    badge.text = count > 99 ? @"99+" : [NSString stringWithFormat:@"%ld", (long)count];
+    [badge sizeToFit];
+    CGSize size = badge.bounds.size;
+    CGFloat diameter = MAX(18, MAX(size.width + 9, size.height + 6));
+    badge.bounds = CGRectMake(0, 0, diameter, diameter);
+    badge.layer.cornerRadius = diameter / 2;
+    UIView *icon = QNotificationAppIcon(root);
+    if (icon) {
+        CGPoint anchor = [icon.superview convertPoint:CGPointMake(CGRectGetMaxX(icon.bounds) - 3, 3)
+                                              toView:root];
+        badge.center = anchor;
+        if (badge.superview != root) [root addSubview:badge];
+        [root bringSubviewToFront:badge];
+    } else if (badge.superview) {
+        [badge removeFromSuperview];
+    }
+}
+
+// Declared for the compiler; guarded by respondsToSelector at runtime.
+@interface UIView (QStackCountProbe)
+- (NSArray *)notificationRequests;
+@end
+
+// A stack's identity from the data model: section + thread. Views come and
+// go (the system detaches hidden cards' views when folded), but the identity
+// is stable, so we can count the stack across every source that has it.
+@interface UIViewController (QStackRequestProbe)
+- (id)notificationRequest;
+@end
+@interface NSObject (QStackRequestIDsProbe)
+- (NSString *)sectionIdentifier;
+- (NSString *)threadIdentifier;
+@end
+
+static NSString *QStackKeyForRequest(id request) {
+    if (!request) return nil;
+    NSString *secHit = nil, *threadHit = nil;
+    id section = QTryKVCKeys(request,
+        (@[@"sectionIdentifier", @"sectionID", @"_sectionIdentifier"]), &secHit);
+    id thread = QTryKVCKeys(request,
+        (@[@"threadIdentifier", @"threadID", @"coalescingIdentifier", @"_threadIdentifier"]), &threadHit);
+    if (![section isKindOfClass:NSString.class] || ![(NSString *)section length]) return nil;
+    NSString *threadStr = [thread isKindOfClass:NSString.class] ? thread : @"";
+    return [NSString stringWithFormat:@"%@|%@", section, threadStr];
+}
+
+// A section-only key (no thread identifier) merges different stacks of the
+// same app, which over-counts (e.g. true 3 shows 4). Only trust the
+// cross-view / model sources when the key carries a real thread.
+static BOOL QStackKeyHasThread(NSString *key) {
+    NSRange r = [key rangeOfString:@"|" options:NSBackwardsSearch];
+    return r.location != NSNotFound && r.location + 1 < key.length;
+}
+
+static NSString *QStackKeyForView(UIView *view) {
+    // The request itself is cached so both the stack key and the notification
+    // identifier come from one probe.
+    id cachedReq = objc_getAssociatedObject(view, QRequestKey);
+    id request = nil;
+    UIResponder *r = nil;
+    NSString *reqHit = nil;
+    if (cachedReq) {
+        request = (cachedReq == (id)[NSNull null]) ? nil : cachedReq;
+        // A cached miss is retried: the request may simply not have been set yet.
+        if (!request) cachedReq = nil;
+    }
+    if (!cachedReq) {
+        r = view.nextResponder;
+        while (r && ![r isKindOfClass:UIViewController.class]) r = r.nextResponder;
+        request = QTryKVCKeys(r,
+            (@[@"notificationRequest", @"request", @"_notificationRequest"]), &reqHit);
+        // Only cache hits; misses are re-probed next time.
+        if (request) objc_setAssociatedObject(view, QRequestKey,
+            request, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    NSString *key = QStackKeyForRequest(request);
+    return key;
+}
+
+// Unique notification identifier, for deduplicating views that represent
+// the same notification (e.g. a banner and its list card).
+static NSString *QNotificationIDForView(UIView *view) {
+    id cachedReq = objc_getAssociatedObject(view, QRequestKey);
+    id request = (cachedReq == (id)[NSNull null]) ? nil : cachedReq;
+    if (!request) { (void)QStackKeyForView(view); cachedReq = objc_getAssociatedObject(view, QRequestKey); request = (cachedReq == (id)[NSNull null]) ? nil : cachedReq; }
+    if (!request) return nil;
+    id nid = QTryKVCKeys(request, (@[@"notificationIdentifier", @"identifier"]), NULL);
+    return [nid isKindOfClass:NSString.class] ? nid : nil;
+}
+
+// Every styled notification view we know, grouped by stack identity. Catches
+// detached-but-alive card views that the overlap walk can no longer see.
+// Only counts views inside the SAME NCNotificationListView as the stack:
+// without this, banners and other lists (lock screen vs notification center)
+// for the same app+thread pollute the count (true 3 showing 7).
+// Deduplicates by notification identifier as a second line of defense.
+static NSInteger QActiveTableStackCount(NSString *stackKey, UIView *listContainer) {
+    if (!stackKey) return 0;
+    NSMutableSet<NSString *> *seenIDs = [NSMutableSet set];
+    NSInteger n = 0;
+    for (UIView *v in qActiveNotifications.allObjects) {
+        if (![QStackKeyForView(v) isEqualToString:stackKey]) continue;
+        if (listContainer && QStackContainer(v) != listContainer) continue;
+        NSString *nid = QNotificationIDForView(v);
+        if (nid.length) {
+            if ([seenIDs containsObject:nid]) continue;
+            [seenIDs addObject:nid];
+        }
+        n++;
+    }
+    return n;
+}
+
+// The list's data model: the only source that knows requests whose views
+// were never created (a stack that arrived already folded).
+static NSInteger QMasterListStackCount(NSString *stackKey, UIView *listContainer) {
+    // Model-based count: NCNotificationGroupList._orderedRequests holds ALL
+    // requests for the stack, even after folding destroys the card views.
+    // Match by section+thread identifier; prefer the section list whose view
+    // is the container we're in (lock screen vs notification center).
+    if (!stackKey) return 0;
+    id master = qMasterList;
+    if (!master) return 0;
+    id sections = QTryKVCKeys(master, (@[@"_notificationSections"]), NULL);
+    NSUInteger sc = [sections respondsToSelector:@selector(count)] ? [sections count] : 0;
+    NSInteger bestInContainer = 0, bestAnywhere = 0;
+    for (NSUInteger i = 0; i < sc; i++) {
+        id sl = [sections objectAtIndex:i];
+        id slView = QTryKVCKeys(sl, (@[@"_sectionListView"]), NULL);
+        BOOL isOurs = (listContainer && slView == listContainer);
+        id groups = QTryKVCKeys(sl, (@[@"_notificationGroups"]), NULL);
+        NSUInteger gc = [groups respondsToSelector:@selector(count)] ? [groups count] : 0;
+        for (NSUInteger j = 0; j < gc; j++) {
+            id g = [groups objectAtIndex:j];
+            NSString *sid = QTryKVCKeys(g, (@[@"_sectionIdentifier"]), NULL);
+            if (![sid isKindOfClass:NSString.class]) continue;
+            NSString *tid = QTryKVCKeys(g, (@[@"_threadIdentifier"]), NULL);
+            if (![tid isKindOfClass:NSString.class] || !tid.length)
+                tid = [@"req-" stringByAppendingString:sid];
+            NSString *gkey = [NSString stringWithFormat:@"%@|%@", sid, tid];
+            if (![gkey isEqualToString:stackKey]) continue;
+            id reqs = QTryKVCKeys(g, (@[@"_orderedRequests"]), NULL);
+            NSInteger n = [reqs respondsToSelector:@selector(count)] ? (NSInteger)[reqs count] : 0;
+            if (n > bestAnywhere) bestAnywhere = n;
+            if (isOurs && n > bestInContainer) bestInContainer = n;
+        }
+    }
+    return bestInContainer > 0 ? bestInContainer : bestAnywhere;
+}
+
+static UIView *QStackCellForView(UIView *view) {    for (UIView *a = view.superview; a && ![a isKindOfClass:UIWindow.class]; a = a.superview) {
+        if ([NSStringFromClass(a.class) isEqualToString:@"NCNotificationListCell"]) return a;
+    }
+    return nil;
+}
+
+// True stack size, from the data model rather than the views: after folding,
+// the system detaches the hidden cards' views, so counting overlapping views
+// under-reports (e.g. 5 becomes 3). Group the overlapping views by their
+// cell and sum each cell's notificationRequests; fall back to the view count
+// when the model is unavailable.
+static NSInteger QStackCount(UIView *root, NSArray<UIView *> *siblings) {
+    NSMutableArray<UIView *> *views = [NSMutableArray arrayWithObject:root];
+    [views addObjectsFromArray:siblings];
+    NSMutableSet<UIView *> *cells = [NSMutableSet set];
+    NSInteger extra = 0;
+    for (UIView *v in views) {
+        UIView *cell = QStackCellForView(v);
+        if (cell) [cells addObject:cell];
+        else extra++;
+    }
+    NSInteger count = extra;
+    for (UIView *cell in cells) {
+        NSInteger n = 0;
+        NSString *cellHit = nil;
+        id reqs = QTryKVCKeys(cell,
+            (@[@"notificationRequests", @"requests", @"_notificationRequests", @"stackedNotificationRequests"]),
+            &cellHit);
+        if ([reqs isKindOfClass:NSArray.class]) n = (NSInteger)[(NSArray *)reqs count];
+        if (n <= 0) {
+            for (UIView *v in views) {
+                if (QStackCellForView(v) == cell) n++;
+            }
+        }
+        count += n;
+    }
+    return count;
+}
+
+static void QUpdateStackState(UIView *root) {
+    NSArray<UIView *> *siblings = QStackSiblings(root);
+    UIView *container = QStackContainer(root);
+    CGRect rootFrame = container ? [root convertRect:root.bounds toView:container] : CGRectNull;
+    CGFloat rootArea = CGRectIsNull(rootFrame) ? 0 : rootFrame.size.width * rootFrame.size.height;
+    // The front card of a folded stack is full-size; the cards behind are
+    // scaled down. Area decides, z-order breaks ties. Only used to place the
+    // count badge on the top card; the glass effect itself is no longer
+    // gated by it (rolled back to pre-2.2.6: every card gets glass).
+    BOOL front = YES;
+    for (UIView *sibling in siblings) {
+        CGRect f = [sibling convertRect:sibling.bounds toView:container];
+        CGFloat area = f.size.width * f.size.height;
+        if (area > rootArea * 1.02) { front = NO; break; }
+        if (fabs(area - rootArea) <= rootArea * 0.02 && QIsViewInFrontOf(sibling, root)) { front = NO; break; }
+    }
+    // Only a real (overlapping) stack uses the model count; a lone card is
+    // always 1 even if its cell hosts other requests.
+    NSInteger count = 1;
+    NSInteger cellCount = 0, tableCount = 0, masterCount = 0;
+    NSString *stackKey = nil;
+    if (siblings.count) {
+        cellCount = QStackCount(root, siblings);
+        count = cellCount;
+        // The overlap walk under-reports once the system detaches hidden
+        // cards' views (folded stacks render ~3 layers). Take the max across
+        // every source that knows the stack: cell model, all styled views
+        // grouped by stack identity, and the list's data model.
+        stackKey = QStackKeyForView(root);
+        if (stackKey && QStackKeyHasThread(stackKey)) {
+            tableCount = QActiveTableStackCount(stackKey, container);
+            if (tableCount > count) count = tableCount;
+            masterCount = QMasterListStackCount(stackKey, container);
+            if (masterCount > count) count = masterCount;
+        }
+    }
+    QUpdateCountBadge(root, count, front);
+}
+
+static BOOL qRefreshingStackStates = NO;
+
+// Fold/unfold animations move the stacked cards via transforms, which do not
+// trigger the card views' own layout passes, so the count badge can go stale
+// (e.g. not appearing right after folding). Refresh the badge when the cell
+// or the list lays out; the update itself is cheap and idempotent.
+static void QRefreshStackStatesIn(UIView *container) {
+    if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"]) return;
+    if (!container.window || qRefreshingStackStates) return;
+    qRefreshingStackStates = YES;
+    for (UIView *root in qActiveNotifications.allObjects) {
+        if (!root.window) continue;
+        BOOL inside = NO;
+        for (UIView *a = root; a && ![a isKindOfClass:UIWindow.class]; a = a.superview) {
+            if (a == container) { inside = YES; break; }
+        }
+        if (inside) QUpdateStackState(root);
+    }
+    qRefreshingStackStates = NO;
+}
+
 static void QApplyBannerGlass(UIView *root, UIView *material) {
     QApplyGlassSurface(root, material, NO);
 }
@@ -708,6 +1109,173 @@ static void QStyleQuickActionButton(UIView *button) {
         }
     }
     if (material) QApplyGlassSurface(button, material, YES);
+}
+
+static void QStyleToggleControl(UIView *button) {
+    // The coalescing header's collapse pill and clear disk keep their native
+    // label/glyph and hit handling. Only their backdrop gets the liquid
+    // glass treatment, reusing the quick-action renderer.
+    if (!button || !button.superview) return;
+    // Hooking the toggle itself (not its container) guarantees the backdrop
+    // already has its final frame when we style it.
+    // The per-app coalesced header (collapse pill + clear disk) and the
+    // Notification Center section header (clear button) both host toggles.
+    if (!QHasAncestor(button, @"NCNotificationListCoalescingControlsView") &&
+        !QHasAncestor(button, @"NCNotificationListSectionHeaderView")) return;
+    // Clean slate: the toggle rebuilds its backdrop across states (fold /
+    // clear confirmation). Remove our previous glass, restore any backdrop
+    // we hid, so exactly one glass ends up installed per pass.
+    for (UIView *subview in [button.subviews copy]) {
+        if (objc_getAssociatedObject(subview, QBannerGlassCompatibilityKey)) {
+            [subview removeFromSuperview];
+        } else if (subview.hidden && objc_getAssociatedObject(subview, QBannerGlassKey)) {
+            subview.hidden = NO;
+        }
+    }
+    UIView *material = nil;
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:button];
+    while (queue.count && !material) {
+        UIView *view = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if (view != button) {
+            NSString *name = NSStringFromClass(view.class);
+            // MTMaterialView is the pill/circle backdrop. Never the label or glyph itself.
+            if ([name containsString:@"MaterialView"] ||
+                [name containsString:@"VisualEffectView"] ||
+                [name containsString:@"BackdropView"]) {
+                material = view;
+                break;
+            }
+        }
+        [queue addObjectsFromArray:view.subviews];
+    }
+    UIView *proxy = objc_getAssociatedObject(button, QToggleGlassProxyKey);
+    if (material) {
+        if (proxy) {
+            [proxy removeFromSuperview];
+            objc_setAssociatedObject(button, QToggleGlassProxyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        QApplyGlassSurface(button, material, YES);
+    } else {
+        // No native backdrop (the clear disk only hosts a glyph): glass a
+        // transparent proxy instead, circular like the native disk and
+        // centered on the glyph.
+        if (!proxy) {
+            proxy = [[UIView alloc] init];
+            proxy.userInteractionEnabled = NO;
+            proxy.backgroundColor = UIColor.clearColor;
+            objc_setAssociatedObject(button, QToggleGlassProxyKey, proxy,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        UIView *glyph = nil;
+        NSMutableArray<UIView *> *gqueue = [NSMutableArray arrayWithObject:button];
+        while (gqueue.count && !glyph) {
+            UIView *view = gqueue.firstObject;
+            [gqueue removeObjectAtIndex:0];
+            if (view != button && view != proxy &&
+                ([view isKindOfClass:UILabel.class] || [view isKindOfClass:UIImageView.class])) {
+                glyph = view;
+                break;
+            }
+            [gqueue addObjectsFromArray:view.subviews];
+        }
+        CGFloat d = MIN(button.bounds.size.width, button.bounds.size.height);
+        CGPoint center = CGPointMake(CGRectGetMidX(button.bounds), CGRectGetMidY(button.bounds));
+        if (glyph) center = [glyph.superview convertPoint:glyph.center toView:button];
+        if (proxy.superview != button) [button insertSubview:proxy atIndex:0];
+        proxy.frame = CGRectMake(center.x - d / 2, center.y - d / 2, d, d);
+        proxy.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin |
+                                 UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
+        QApplyGlassSurface(button, proxy, YES);
+    }
+    // Keep the native label/glyph above the glass.
+    for (UIView *subview in button.subviews) {
+        if ([subview isKindOfClass:UILabel.class] || [subview isKindOfClass:UIImageView.class])
+            [button bringSubviewToFront:subview];
+    }
+    // Force dark mode like the notification banners: the collapse pill,
+    // the clear disk, and the Notification Center section header buttons
+    // must render white content even when the system is in light mode.
+    // (Direct textColor/tintColor forcing alone doesn't stick; the system
+    // resets it. overrideUserInterfaceStyle is what the banners use.)
+    if (button.overrideUserInterfaceStyle != UIUserInterfaceStyleDark)
+        button.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    // Force white text/icons like the notification banners: the collapse
+    // pill, the clear disk, and the Notification Center section header
+    // buttons all sit on glass and must stay legible.
+    NSMutableArray<UIView *> *wqueue = [NSMutableArray arrayWithObject:button];
+    while (wqueue.count) {
+        UIView *view = wqueue.lastObject;
+        [wqueue removeLastObject];
+        if ([view isKindOfClass:UILabel.class]) {
+            ((UILabel *)view).textColor = UIColor.whiteColor;
+        } else if ([view isKindOfClass:UIImageView.class]) {
+            ((UIImageView *)view).tintColor = UIColor.whiteColor;
+        } else if ([view isKindOfClass:UIButton.class]) {
+            UIButton *b = (UIButton *)view;
+            [b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+            b.tintColor = UIColor.whiteColor;
+        }
+        [wqueue addObjectsFromArray:view.subviews];
+    }
+}
+
+static void QStyleActionButton(UIView *button) {
+    // Left-swipe notification actions ("选项" / "清除", PLPlatterActionButton).
+    // Keep the native title and tap handling; only the MTMaterialView
+    // backdrop becomes liquid glass.
+    if (!button || !button.superview) return;
+    // Clean slate: the buttons animate in while swiping and rebuild their
+    // backdrop. Exactly one glass per button per pass.
+    for (UIView *subview in [button.subviews copy]) {
+        if (objc_getAssociatedObject(subview, QBannerGlassCompatibilityKey)) {
+            [subview removeFromSuperview];
+        } else if (subview.hidden && objc_getAssociatedObject(subview, QBannerGlassKey)) {
+            subview.hidden = NO;
+        }
+    }
+    UIView *material = nil;
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:button];
+    while (queue.count && !material) {
+        UIView *view = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if (view != button) {
+            NSString *name = NSStringFromClass(view.class);
+            if ([name containsString:@"MaterialView"] ||
+                [name containsString:@"VisualEffectView"] ||
+                [name containsString:@"BackdropView"]) {
+                material = view;
+                break;
+            }
+        }
+        [queue addObjectsFromArray:view.subviews];
+    }
+    if (!material) return;
+    // The title may live inside the material view; hiding the material must
+    // not take the label with it. Hoist such labels up to the button,
+    // preserving their on-screen frame.
+    NSMutableArray<UIView *> *labels = [NSMutableArray array];
+    NSMutableArray<UIView *> *lqueue = [NSMutableArray arrayWithObject:button];
+    while (lqueue.count) {
+        UIView *view = lqueue.firstObject;
+        [lqueue removeObjectAtIndex:0];
+        if (view != button && !objc_getAssociatedObject(view, QBannerGlassCompatibilityKey) &&
+            ([view isKindOfClass:UILabel.class] || [view isKindOfClass:UIImageView.class])) {
+            BOOL insideMaterial = NO;
+            for (UIView *p = view.superview; p && p != button; p = p.superview) {
+                if (p == material) { insideMaterial = YES; break; }
+            }
+            if (insideMaterial) {
+                CGRect f = [view.superview convertRect:view.frame toView:button];
+                [button addSubview:view];
+                view.frame = f;
+            }
+            [labels addObject:view];
+        }
+        [lqueue addObjectsFromArray:view.subviews];
+    }
+    QApplyGlassSurface(button, material, YES);
+    for (UIView *label in labels) [button bringSubviewToFront:label];
 }
 
 // A persistent SpringBoard preview uses the exact desktop glass renderer.
@@ -845,6 +1413,7 @@ static void QStyle(UIView *root) {
     QSetLockNotificationAppearance(appearanceRoot,
         stylingEnabled && lockNotification ? UIUserInterfaceStyleDark : UIUserInterfaceStyleUnspecified);
     [qActiveNotifications addObject:root];
+    QUpdateStackState(root);
     QRestoreStyle(root);
     UIView *material = QFind(root, @"MTMaterialView");
     if (![qSettings[@"masterEnabled"] boolValue] || ![qSettings[@"enabled"] boolValue]) {
@@ -875,6 +1444,7 @@ static void QStyle(UIView *root) {
         UIView *view = queue.lastObject;
         [queue removeLastObject];
         if ([view isKindOfClass:UILabel.class]) {
+            if (objc_getAssociatedObject(view, QCountBadgeKey)) continue; // our count badge
             UILabel *label = (UILabel *)view;
             QRememberStyle(label);
             // The glass replaces Apple's material, so its labels must follow
@@ -884,6 +1454,11 @@ static void QStyle(UIView *root) {
             } else if ([qSettings[@"glassBanners"] boolValue] &&
                        (QIsLockScreenNotification(root) || QIsDesktopBanner(root))) {
                 label.textColor = QAdaptiveGlassTextColor();
+            }
+            if ([qSettings[@"autoContrastText"] boolValue] && material &&
+                objc_getAssociatedObject(material, QBannerGlassKey)) {
+                UIColor *contrast = QContrastTextColor(root);
+                if (contrast) label.textColor = contrast;
             }
         }
         NSString *name = NSStringFromClass(view.class);
@@ -971,6 +1546,29 @@ extern "C" void QInstallNativeArtworkHooks(void);
     %orig;
     [qActiveQuickActionButtons addObject:self];
     QStyleQuickActionButton(self);
+}
+
+%end
+%end
+
+%group QHeaderButtons
+%hook NCToggleControl
+
+- (void)layoutSubviews {
+    %orig;
+    // The collapse pill and the clear disk in the per-app coalesced header.
+    // Styling here (not on the container) means the backdrop frame is final.
+    QStyleToggleControl((UIView *)self);
+}
+
+%end
+
+%hook PLPlatterActionButton
+
+- (void)layoutSubviews {
+    %orig;
+    // The "选项" / "清除" buttons revealed by swiping a notification left.
+    QStyleActionButton((UIView *)self);
 }
 
 %end
@@ -1077,34 +1675,37 @@ static void QClearOwnLayerTransform(UIView *list) {
 // 不改 UIScrollView.transform：系统按 frame 重新布局时会把 bounds 扩到 1/scale，
 // 截图实测 430pt 变成 581.625pt，视觉宽度因而回到原生。
 // sublayerTransform 只变换子层的绘制坐标，不会让滚动视图本身的 bounds 被反向放大。
-static void QApplyListScaling(UIView *list) {
-    if (!list || ![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"]) return;
+// 返回 YES：已应用，或无需应用（非 SpringBoard / 非最外层列表 / 缩放关闭）。
+// 返回 NO：系统正占用这一层的 sublayerTransform，调用方应稍后重试，而不是丢弃。
+static BOOL QApplyListScaling(UIView *list) {
+    if (!list || ![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"]) return YES;
     QUpdateScrollIndicator(list);
     for (UIView *ancestor = list.superview; ancestor; ancestor = ancestor.superview) {
         if ([NSStringFromClass(ancestor.class) containsString:@"NCNotificationListView"]) {
             QClearOwnLayerTransform(list);
-            return;
+            return YES;
         }
     }
     CGFloat scale = QShrinkScale();
-    if (scale >= 1.0) { QClearOwnLayerTransform(list); return; }
+    if (scale >= 1.0) { QClearOwnLayerTransform(list); return YES; }
     NSValue *owned = objc_getAssociatedObject(list, QOwnLayerTransformKey);
     if (!owned) {
         CATransform3D original = list.layer.sublayerTransform;
-        if (!CATransform3DIsIdentity(original)) return;
+        if (!CATransform3DIsIdentity(original)) return NO;
         objc_setAssociatedObject(list, QOriginalLayerTransformKey,
                                  [NSValue valueWithCATransform3D:original],
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     } else if (!CATransform3DEqualToTransform(list.layer.sublayerTransform,
                                               owned.CATransform3DValue)) {
-        return; // 系统正在修改这一层，不覆盖系统的变换。
+        return NO; // 系统正在修改这一层，不覆盖系统的变换，稍后重试。
     }
     CATransform3D target = CATransform3DMakeScale(scale, scale, 1);
-    if (CATransform3DEqualToTransform(list.layer.sublayerTransform, target)) return;
+    if (CATransform3DEqualToTransform(list.layer.sublayerTransform, target)) return YES;
     objc_setAssociatedObject(list, QOwnLayerTransformKey,
                              [NSValue valueWithCATransform3D:target],
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     list.layer.sublayerTransform = target;
+    return YES;
 }
 
 static BOOL QClearOrdinaryNotifications(void) {
@@ -1310,7 +1911,20 @@ static void QScheduleListScaling(UIView *list) {
     dispatch_async(dispatch_get_main_queue(), ^{
         objc_setAssociatedObject(list, QScalePendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         if (!list.window) return;
-        QApplyListScaling(list);
+        if (QApplyListScaling(list)) {
+            objc_setAssociatedObject(list, QScaleRetryKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            return;
+        }
+        // 系统正占用这一层的 sublayerTransform（通知插入 / 锁屏呈现动画期间）：
+        // 推迟重试而不是直接丢弃，否则新通知要等到下一次滑动触发 layout 才有样式。
+        // 重试有上限，避免在系统长期占用时与其打架；从不覆盖系统的变换，只等它用完。
+        NSInteger retries = [objc_getAssociatedObject(list, QScaleRetryKey) integerValue];
+        if (retries >= 10 || !list.window) return;
+        objc_setAssociatedObject(list, QScaleRetryKey, @(retries + 1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            QScheduleListScaling(list);
+        });
     });
 }
 
@@ -1333,6 +1947,16 @@ static void QScheduleListScaling(UIView *list) {
         [qActiveLists addObject:list];
     }
     QScheduleListScaling(list);
+    QRefreshStackStatesIn((UIView *)self);
+}
+
+%end
+
+%hook NCNotificationListView
+
+- (void)layoutSubviews {
+    %orig;
+    QRefreshStackStatesIn((UIView *)self);
 }
 
 %end
@@ -1348,15 +1972,8 @@ static void QScheduleListScaling(UIView *list) {
     if (!QHasAncestor(self, @"NCNotificationListCell")) return;
     if (!QFind(self, @"CSActivityItemContentView")) return;
     QPlayerView *player = objc_getAssociatedObject(self, QSpringBoardPlayerKey);
-    // The Now Playing UI is hosted by MediaRemoteUI in a remote scene, so its
-    // MRU child views cannot be found from SpringBoard's platter hierarchy.
-    // Ordinary Live Activities also have CSActivityItemContentView, but do not
-    // use this measured 167-point Cover Sheet scene host.
     BOOL mediaPlatter = size.height >= 145 &&
                         QFind(self, @"_UISceneLayerHostContainerView");
-    // 大封面展开时，MediaRemoteUI 紧凑场景被拆，场景宿主视图暂时消失。
-    // 若已为此 platter 创建了 Quart 播放器，说明它确定是 Now Playing 宿主，
-    // 不能因此退回原生样式。
     if (!mediaPlatter && !player) {
         self.alpha = 1;
         self.layer.opacity = 1;
@@ -1458,6 +2075,7 @@ static void QScheduleListScaling(UIView *list) {
         }
         if (objc_getClass("NCNotificationShortLookViewController")) %init(QNotifications);
         if (objc_getClass("CSQuickActionsButton")) %init(QQuickActions);
+        if (objc_getClass("NCToggleControl")) %init(QHeaderButtons);
         if (objc_getClass("PLPlatterView")) %init(QHostPlatter);
         if (objc_getClass("NCNotificationListCell")) %init(QScale);
         if (objc_getClass("NCNotificationMasterList")) %init(QMasterGesture);
