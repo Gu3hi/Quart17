@@ -103,6 +103,7 @@ static void QLoadSettings(void) {
                     @"scaleBanners": @NO, @"glassBanners": @NO,
                     @"showNotificationCount": @YES,
                     @"playerAppearance": @0,
+                    @"largeArtworkOffsetY": @0,
                     @"glassBlur": @8, @"glassRefraction": @12, @"glassHighlight": @0.5,
                     @"desktopVeil": @28, @"lockVeil": @28,
                     @"clearAllEnabled": @YES, @"clearHapticEnabled": @YES,
@@ -329,8 +330,6 @@ static UIColor *QAdaptiveGlassTextColor(void) {
     });
     return color;
 }
-
-static const void *QNativeLumKey = &QNativeLumKey;
 
 static CGFloat QColorLuminance(UIColor *color) {
     if (!color) return -1;
@@ -1082,21 +1081,26 @@ static void QUpdateStackState(UIView *root) {
     // always 1 even if its cell hosts other requests.
     // 模型计数只在确认折叠时使用，展开时不用（避免展开后仍显示错误计数）。
     NSInteger count = 1;
-    NSInteger cellCount = 0, tableCount = 0, masterCount = 0;
     NSString *stackKey = nil;
     if (siblings.count && hasFoldedBehind) {
-        cellCount = QStackCount(root, siblings);
-        count = cellCount;
-        // The overlap walk under-reports once the system detaches hidden
-        // cards' views (folded stacks render ~3 layers). Take the max across
-        // every source that knows the stack: cell model, all styled views
-        // grouped by stack identity, and the list's data model.
+        // 计数优先级：数据模型 > 视图统计。数据模型（_orderedRequests）是唯一知道
+        // 视图未创建请求（已折叠到达的堆叠）的来源。视图统计在折叠后会少算
+        // （系统只渲染约3层），但可能因重复请求或跨列表数据而多算，因此只在
+        // 模型不可用时作为回退，不再取多源最大值。
         stackKey = QStackKeyForView(root);
+        NSInteger masterCount = 0;
         if (stackKey && QStackKeyHasThread(stackKey)) {
-            tableCount = QActiveTableStackCount(stackKey, container);
-            if (tableCount > count) count = tableCount;
             masterCount = QMasterListStackCount(stackKey, container);
-            if (masterCount > count) count = masterCount;
+        }
+        if (masterCount > 0) {
+            count = masterCount;
+        } else {
+            // 模型不可用时的回退：用 cell 模型的请求数
+            count = QStackCount(root, siblings);
+            if (count < 1) count = 1;
+        }
+        if (stackKey && QStackKeyHasThread(stackKey)) {
+            NSInteger tableCount = QActiveTableStackCount(stackKey, container);
             // 可见视图数 >= 模型总数 → 所有通知都可见 = 展开状态，不显示徽标
             // 折叠时系统只渲染约3层，可见数 < 总数，才显示计数
             if (masterCount > 0 && tableCount >= masterCount) {
@@ -1119,14 +1123,20 @@ static void QUpdateStackState(UIView *root) {
 }
 
 static BOOL qRefreshingStackStates = NO;
+static CFAbsoluteTime qLastStackRefresh = 0;
 
 // Fold/unfold animations move the stacked cards via transforms, which do not
 // trigger the card views' own layout passes, so the count badge can go stale
 // (e.g. not appearing right after folding). Refresh the badge when the cell
-// or the list lays out; the update itself is cheap and idempotent.
+// or the list lays out. Throttled: layout can fire many times per second
+// during scrolling, and each refresh walks all notifications (O(n²) worst
+// case on the main thread). 150ms is plenty for badge freshness.
 static void QRefreshStackStatesIn(UIView *container) {
     if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"]) return;
     if (!container.window || qRefreshingStackStates) return;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - qLastStackRefresh < 0.15) return;
+    qLastStackRefresh = now;
     qRefreshingStackStates = YES;
     for (UIView *root in qActiveNotifications.allObjects) {
         if (!root.window) continue;
@@ -1173,6 +1183,27 @@ static void QStyleToggleControl(UIView *button) {
     // already has its final frame when we style it.
     // The per-app coalesced header (collapse pill + clear disk) and the
     // Notification Center section header (clear button) both host toggles.
+    // If glass or master is off, restore original state and return.
+    BOOL enabled = [qSettings[@"masterEnabled"] boolValue];
+    if (!enabled) {
+        // Remove our glass
+        for (UIView *subview in [button.subviews copy]) {
+            if (objc_getAssociatedObject(subview, QBannerGlassCompatibilityKey)) {
+                [subview removeFromSuperview];
+            } else if (subview.hidden && objc_getAssociatedObject(subview, QBannerGlassKey)) {
+                subview.hidden = NO;
+            }
+        }
+        UIView *proxy = objc_getAssociatedObject(button, QToggleGlassProxyKey);
+        if (proxy) {
+            [proxy removeFromSuperview];
+            objc_setAssociatedObject(button, QToggleGlassProxyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        // Restore system appearance (was forced to Dark)
+        if (button.overrideUserInterfaceStyle != UIUserInterfaceStyleUnspecified)
+            button.overrideUserInterfaceStyle = UIUserInterfaceStyleUnspecified;
+        return;
+    }
     if (!QHasAncestor(button, @"NCNotificationListCoalescingControlsView") &&
         !QHasAncestor(button, @"NCNotificationListSectionHeaderView")) return;
     // Clean slate: the toggle rebuilds its backdrop across states (fold /
@@ -1538,20 +1569,15 @@ static void QStyle(UIView *root) {
                 label.textColor = UIColor.whiteColor;
             } else if ([qSettings[@"glassBanners"] boolValue] &&
                        (QIsLockScreenNotification(root) || QIsDesktopBanner(root))) {
-                // Follow the native text color: the system already chose it
-                // for the current context (light mode = black text, dark
-                // mode = white text). Cache the native luminance so
-                // re-styling doesn't read back our own override.
-                NSNumber *saved = objc_getAssociatedObject(label, QNativeLumKey);
-                CGFloat nativeLum = saved ? saved.doubleValue : -1;
-                if (!saved) {
-                    nativeLum = QColorLuminance(label.textColor);
-                    objc_setAssociatedObject(label, QNativeLumKey, @(nativeLum),
-                        OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                }
-                if (nativeLum >= 0) {
-                    label.textColor = nativeLum > 0.5 ? UIColor.whiteColor
-                                                     : UIColor.blackColor;
+                // Follow the native text color: the system chooses it for
+                // the current context (light mode = black text, dark mode =
+                // white text). Read the live trait collection each time
+                // instead of caching: cached luminance goes stale across
+                // light/dark switches or when the system reuses the label.
+                if (label.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark) {
+                    label.textColor = UIColor.whiteColor;
+                } else if (label.traitCollection.userInterfaceStyle == UIUserInterfaceStyleLight) {
+                    label.textColor = UIColor.blackColor;
                 } else {
                     label.textColor = QAdaptiveGlassTextColor();
                 }
@@ -2075,8 +2101,14 @@ static void QScheduleListScaling(UIView *list) {
     if (!QHasAncestor(self, @"NCNotificationListCell")) return;
     if (!QFind(self, @"CSActivityItemContentView")) return;
     QPlayerView *player = objc_getAssociatedObject(self, QSpringBoardPlayerKey);
+    // 播放器识别：MRUNowPlayingLabelView / MRUNowPlayingTimeControlsView 是
+    // MediaRemoteUI 原生视图，为强信号；_UISceneLayerHostContainerView 为弱
+    // 信号（远程进程承载，不一定在层级里）。任一命中即视为媒体播放器。
+    // QPlayerView 建出后会自验是否真有媒体在播，无媒体时自行隐藏。
     BOOL mediaPlatter = size.height >= 145 &&
-                        QFind(self, @"_UISceneLayerHostContainerView");
+                        (QFind(self, @"MRUNowPlayingLabelView") ||
+                         QFind(self, @"MRUNowPlayingTimeControlsView") ||
+                         QFind(self, @"_UISceneLayerHostContainerView"));
     if (!mediaPlatter && !player) {
         self.alpha = 1;
         self.layer.opacity = 1;

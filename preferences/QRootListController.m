@@ -3,7 +3,13 @@
 #import <Preferences/PSTableCell.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <UIKit/UIKit.h>
+#ifdef Q_ROOTHIDE
 #import <roothide.h>
+#define QJbroot(path) jbroot(path)
+#else
+// 标准 Rootless：直接使用 /var/jb 前缀
+#define QJbroot(path) [@"/var/jb" stringByAppendingString:(path)]
+#endif
 #import <notify.h>
 
 static NSString *QPrefsPath(void) {
@@ -33,6 +39,16 @@ static void QWritePref(NSString *key, id value) {
             notify_set_state(token, ((uint64_t)llround(expandedCorner * 10000) << 48) |
                 ((uint64_t)llround(scale * 10000) << 32) |
                 0x51700000ULL | (uint64_t)llround(corner * 10000));
+            notify_cancel(token);
+        }
+    }
+    // 大封面上下位移走独立同步通道（-200~200，存 (v+200)*100+1，0 表示未写入）
+    if ([key isEqualToString:@"largeArtworkOffsetY"]) {
+        int token = -1;
+        if (notify_register_check("com.gushi.quart17/artworkoffset", &token) == NOTIFY_STATUS_OK) {
+            double v = [value doubleValue];
+            v = isfinite(v) ? MAX(-200, MIN(200, v)) : 0;
+            notify_set_state(token, (uint64_t)llround((v + 200) * 100) + 1);
             notify_cancel(token);
         }
     }
@@ -129,9 +145,13 @@ static void QWritePref(NSString *key, id value) {
 }
 
 // 统一按「倍率 → 百分比」显示（0-100% 与 70-100% 两种范围都是同一个读法）
+// 底色浓度滑块（desktopVeil/lockVeil）范围是 0-30，已经是百分比数值，直接显示
 - (NSString *)percentForValue:(double)v specifier:(PSSpecifier *)specifier {
     if ([specifier.properties[@"unit"] isEqualToString:@"pt"])
         return [NSString stringWithFormat:@"%.0f pt", round(v)];
+    NSString *key = specifier.properties[@"key"];
+    if ([key isEqualToString:@"desktopVeil"] || [key isEqualToString:@"lockVeil"])
+        return [NSString stringWithFormat:@"%.0f%%", round(v)];
     return [NSString stringWithFormat:@"%.0f%%", round(v * 100.0)];
 }
 
@@ -141,7 +161,8 @@ static void QWritePref(NSString *key, id value) {
     self.qValueLabel.text = [self percentForValue:v specifier:specifier];
     NSString *key = specifier.properties[@"key"];
     if ([key isEqualToString:@"glassBlur"] || [key isEqualToString:@"glassRefraction"] ||
-        [key isEqualToString:@"glassHighlight"]) {
+        [key isEqualToString:@"glassHighlight"] ||
+        [key isEqualToString:@"desktopVeil"] || [key isEqualToString:@"lockVeil"]) {
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
         if (now - self.qLastLiveWrite >= 0.08) {
             self.qLastLiveWrite = now;
@@ -152,7 +173,12 @@ static void QWritePref(NSString *key, id value) {
 
 - (void)sliderCommitted:(UISlider *)slider {
     [self sliderChanged:slider];
-    QWritePref(self.specifier.properties[@"key"], @(slider.value));
+    NSString *key = self.specifier.properties[@"key"];
+    QWritePref(key, @(slider.value));
+    // 大封面大小变化时通知播放器设置页刷新位移滑块显示/隐藏
+    if ([key isEqualToString:@"largeArtworkScale"]) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"QArtworkScaleChanged" object:nil];
+    }
 }
 
 - (void)layoutSubviews {
@@ -221,7 +247,7 @@ static void QWritePref(NSString *key, id value) {
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-- (void)qApplyIconsAndTranslations:(NSArray<PSSpecifier *> *)specifiers {
++ (void)qApplyIconsAndTranslations:(NSArray<PSSpecifier *> *)specifiers isChinese:(BOOL)isChinese {
         NSDictionary *symbols = @{
             @"masterEnabled": @"power", @"enabled": @"bell.badge", @"darkCards": @"moon.fill",
             @"roundIcons": @"app.fill", @"clearAllEnabled": @"arrow.down.to.line",
@@ -234,6 +260,7 @@ static void QWritePref(NSString *key, id value) {
             @"playerCornerRoundness": @"square.on.circle",
             @"largeArtworkScale": @"arrow.up.left.and.arrow.down.right",
             @"largeArtworkRoundness": @"square.on.circle",
+            @"largeArtworkOffsetY": @"arrow.up.and.down",
             @"showProgress": @"slider.horizontal.3", @"progressStyle": @"circle.dotted.circle",
             @"hideControls": @"eye.slash",
             @"hideRoute": @"airplay.audio", @"backgroundFromArtwork": @"paintpalette.fill",
@@ -262,6 +289,7 @@ static void QWritePref(NSString *key, id value) {
             @"播放器外观": @"Player appearance",
             @"大封面大小": @"Expanded artwork size",
             @"大封面圆角": @"Expanded artwork corners",
+            @"大封面上下位移": @"Artwork vertical offset",
             @"播放器与通知圆角": @"Player & notification corners",
             @"显示播放进度": @"Show playback progress",
             @"进度条样式": @"Progress style", @"隐藏控制按钮": @"Hide playback buttons",
@@ -287,7 +315,7 @@ static void QWritePref(NSString *key, id value) {
             @"从右半屏空白处连续两次下滑清除普通通知；滚动列表不会计入。保留音乐控件和实时活动；左半屏下滑打开系统搜索。": @"Swipe down twice from empty space on the right half to clear ordinary notifications. Scrolling the list does not count. Media controls and Live Activities stay; swiping down on the left opens system Search.",
             @"三种进度样式只能选择一种。点右上角“刷新”可更新样式，不会中断音频。": @"Choose one of three progress styles. Refresh updates the style without interrupting audio.",
             @"外观可选 Quart 原风格或液态玻璃；玻璃参数与通知共用。三种进度样式只能选择一种。点右上角“刷新”不会中断音频。": @"Choose Quart original or Liquid Glass. The player shares the notification glass controls. Choose one progress style; Refresh keeps audio playing.",
-            @"大封面与环绕进度条一起缩放；大封面圆角可单独调整。点击封面展开或收起，展开后可横滑播放器调整进度；点击歌名打开播放 App。": @"Expanded artwork and its progress ring scale together. Adjust expanded artwork corners separately. Tap the cover to expand or collapse it, swipe the player to seek while expanded, or tap the title to open the playing app.",
+            @"大封面与环绕进度条一起缩放；大封面圆角可单独调整。缩小时可上下位移大封面。点击封面展开或收起，展开后可横滑播放器调整进度；点击歌名打开播放 App。": @"Expanded artwork and its progress ring scale together. Adjust expanded artwork corners separately. When shrunk, you can shift the artwork vertically. Tap the cover to expand or collapse it, swipe the player to seek while expanded, or tap the title to open the playing app.",
             @"为每首歌从封面提取颜色。关闭某项后，该项使用固定配色。": @"Pick colors from each song's artwork. Disabled items use fixed colors.",
             @"致敬 @LaughingQuoll\n永远怀念最好的开发者。": @"In tribute to @LaughingQuoll\nForever remembering the best developer."
         };
@@ -296,7 +324,7 @@ static void QWritePref(NSString *key, id value) {
             NSString *symbol = key ? symbols[key] : nil;
             UIImage *icon = symbol ? [UIImage systemImageNamed:symbol] : nil;
             if (icon) [specifier setProperty:icon forKey:@"iconImage"];
-            if (!self.isChinese) {
+            if (!isChinese) {
                 if ([key isEqualToString:@"progressStyle"]) {
                     [specifier setProperty:@[@"Background", @"Bottom", @"Artwork ring"] forKey:@"validTitles"];
                 }
@@ -314,7 +342,7 @@ static void QWritePref(NSString *key, id value) {
 - (NSArray *)specifiers {
     if (!self.allQuartSpecifiers) {
         self.allQuartSpecifiers = [self loadSpecifiersFromPlistName:[self qPlistName] target:self];
-        [self qApplyIconsAndTranslations:self.allQuartSpecifiers];
+        [QRootListController qApplyIconsAndTranslations:self.allQuartSpecifiers isChinese:self.isChinese];
     }
     if (!_specifiers) {
         // Sub-pages (QNotifications, QPlayer) show all items; only Root does master-switch filtering
@@ -378,8 +406,9 @@ static void QWritePref(NSString *key, id value) {
 }
 
 - (void)showButtonIconPath:(id)sender {
-    NSString *path = jbroot(@"/Library/Application Support/Quart17/Buttons");
-    NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"filza://view%@", path]];
+    NSString *path = QJbroot(@"/Library/Application Support/Quart17/Buttons");
+    NSString *encoded = [path stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]];
+    NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"filza://view%@", encoded]];
     if (url) [UIApplication.sharedApplication openURL:url options:@{} completionHandler:nil];
 }
 
@@ -419,8 +448,12 @@ static void QWritePref(NSString *key, id value) {
         BOOL chinese = [[NSLocale.preferredLanguages.firstObject lowercaseString] hasPrefix:@"zh"];
         self.title = chinese ? @"通知玻璃" : @"Notification Glass";
         if (!chinese) {
-            NSDictionary *labels = @{@"模糊强度": @"Blur", @"边缘折射": @"Edge refraction",
+            NSDictionary *labels = @{@"通知玻璃": @"Notification Glass",
+                                      @"模糊强度": @"Blur", @"边缘折射": @"Edge refraction",
                                       @"高光强度": @"Highlights",
+                                      @"桌面底色浓度": @"Desktop veil",
+                                      @"锁屏底色浓度": @"Lock Screen veil",
+                                      @"测试横幅": @"Test banner",
                                       @"显示常驻测试横幅": @"Show persistent test banner",
                                       @"移除测试横幅": @"Remove test banner"};
             for (PSSpecifier *specifier in _specifiers) {
@@ -485,6 +518,7 @@ static void QWritePref(NSString *key, id value) {
 - (NSArray *)specifiers {
     if (!_specifiers) {
         _specifiers = [[self loadSpecifiersFromPlistName:@"NSettings" target:self] mutableCopy];
+        [QRootListController qApplyIconsAndTranslations:_specifiers isChinese:[self qIsChinese]];
     }
     return _specifiers;
 }
@@ -518,18 +552,75 @@ static void QWritePref(NSString *key, id value) {
 }
 - (void)viewDidLoad {
     [super viewDidLoad];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(qArtworkScaleChanged)
+                                                 name:@"QArtworkScaleChanged" object:nil];
     self.title = [self qIsChinese] ? @"锁屏播放器" : @"Lock Screen Player";
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
         initWithTitle:[self qIsChinese] ? @"刷新" : @"Refresh"
         style:UIBarButtonItemStylePlain target:self action:@selector(qRespring:)];
 }
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    // PSSegmentCell 不响应 specifier 的 validTitles 修改，直接改 segmented control
+    if ([self qIsChinese]) return;
+    for (UITableViewCell *cell in self.table.visibleCells) {
+        for (UISegmentedControl *seg in cell.contentView.subviews) {
+            if (![seg isKindOfClass:UISegmentedControl.class]) continue;
+            if (seg.numberOfSegments == 2) {
+                [seg setTitle:@"Quart original" forSegmentAtIndex:0];
+                [seg setTitle:@"Liquid Glass" forSegmentAtIndex:1];
+            } else if (seg.numberOfSegments == 3) {
+                [seg setTitle:@"Background" forSegmentAtIndex:0];
+                [seg setTitle:@"Bottom" forSegmentAtIndex:1];
+                [seg setTitle:@"Artwork ring" forSegmentAtIndex:2];
+            }
+        }
+        // segmented control 可能在 cell 的更深层级
+        for (UIView *sub in cell.contentView.subviews) {
+            for (UISegmentedControl *seg in sub.subviews) {
+                if (![seg isKindOfClass:UISegmentedControl.class]) continue;
+                if (seg.numberOfSegments == 2) {
+                    [seg setTitle:@"Quart original" forSegmentAtIndex:0];
+                    [seg setTitle:@"Liquid Glass" forSegmentAtIndex:1];
+                } else if (seg.numberOfSegments == 3) {
+                    [seg setTitle:@"Background" forSegmentAtIndex:0];
+                    [seg setTitle:@"Bottom" forSegmentAtIndex:1];
+                    [seg setTitle:@"Artwork ring" forSegmentAtIndex:2];
+                }
+            }
+        }
+    }
+}
 - (void)qRespring:(id)sender {
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          CFSTR("com.gushi.quart17/preferenceschanged"), NULL, NULL, YES);
 }
+- (void)qArtworkScaleChanged {
+    [self reloadSpecifiers];
+}
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+- (void)showButtonIconPath:(id)sender {
+    NSString *path = QJbroot(@"/Library/Application Support/Quart17/Buttons");
+    NSString *encoded = [path stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]];
+    NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"filza://view%@", encoded]];
+    if (url) [UIApplication.sharedApplication openURL:url options:@{} completionHandler:nil];
+}
 - (NSArray *)specifiers {
     if (!_specifiers) {
         _specifiers = [[self loadSpecifiersFromPlistName:@"PSettings" target:self] mutableCopy];
+        [QRootListController qApplyIconsAndTranslations:_specifiers isChinese:[self qIsChinese]];
+    }
+    // 大封面上下位移滑块仅在大封面缩小时出现
+    double scale = [QReadPref(@"largeArtworkScale", @1) doubleValue];
+    if (scale >= 1) {
+        NSMutableArray *filtered = [NSMutableArray array];
+        for (PSSpecifier *sp in _specifiers) {
+            if (![sp.properties[@"key"] isEqualToString:@"largeArtworkOffsetY"])
+                [filtered addObject:sp];
+        }
+        return filtered;
     }
     return _specifiers;
 }
@@ -545,6 +636,11 @@ static void QWritePref(NSString *key, id value) {
     return QReadPref(specifier.properties[@"key"], specifier.properties[@"default"]);
 }
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
-    QWritePref(specifier.properties[@"key"], value);
+    NSString *key = specifier.properties[@"key"];
+    QWritePref(key, value);
+    // 大封面大小变化时，刷新位移滑块的显示/隐藏
+    if ([key isEqualToString:@"largeArtworkScale"]) {
+        [self reloadSpecifiers];
+    }
 }
 @end

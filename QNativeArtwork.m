@@ -11,6 +11,7 @@ extern void MSHookMessageEx(Class cls, SEL selector, IMP replacement, IMP *origi
 
 static NSHashTable<UIView *> *qArtworkViews;
 static NSDictionary *qArtworkSettings;
+static const void *kQLastShiftYKey = &kQLastShiftYKey;
 static CADisplayLink *qProgressLink;
 static CFTimeInterval qLastInfoRequest;
 static CFTimeInterval qProgressAnchorTime;
@@ -22,6 +23,7 @@ static NSUInteger qBackwardSamples;
 static NSUInteger qForwardSamples;
 static NSUInteger qProgressRequest, qProgressAcceptedRequest;
 static int qCornerStateToken = -1;
+static int qOffsetStateToken = -1;
 static int qSeekStateToken = -1;
 static BOOL qSeekDragging;
 static CGFloat qSeekFraction;
@@ -35,6 +37,7 @@ static const void *qTrackKey = &qTrackKey, *qRingKey = &qRingKey;
 static const void *qShadowWasHiddenKey = &qShadowWasHiddenKey;
 static const void *qArtworkTapKey = &qArtworkTapKey;
 static const void *qAccentImageKey = &qAccentImageKey, *qAccentColorKey = &qAccentColorKey;
+static const void *qSquareMaskKey = &qSquareMaskKey;
 
 static id QInfoValue(NSDictionary *info, CFStringRef *key, NSString *fallback) {
     return info[key && *key ? (__bridge NSString *)*key : fallback];
@@ -88,8 +91,10 @@ static void QApplyArtworkScale(UIView *image) {
     CATransform3D current = container.layer.sublayerTransform;
     CGFloat oldScale = current.m11;
     if (!isfinite(oldScale) || oldScale < 0.1 || oldScale > 2) oldScale = 1;
+    // 上次位移按 container 分别记录，避免多视图互相干扰
+    CGFloat lastShiftY = [objc_getAssociatedObject(container.layer, kQLastShiftYKey) doubleValue];
     CGPoint offset = CGPointMake(current.m41 - center.x * (1 - oldScale),
-                                 current.m42 - center.y * (1 - oldScale));
+                                 current.m42 - center.y * (1 - oldScale) - lastShiftY);
     if (container.window) {
         // CALayer conversion includes sublayerTransform; UIView conversion
         // does not reliably reflect the rendered artwork position here.
@@ -104,11 +109,29 @@ static void QApplyArtworkScale(UIView *image) {
             offset.y += b.y - a.y;
         }
     }
+    // 大封面上下位移：仅在缩小时生效（优先走 notify 同步通道）
+    CGFloat shiftY = 0;
+    if (scale < 1) {
+        uint64_t ostate = 0;
+        BOOL gotOffset = NO;
+        if (qOffsetStateToken >= 0 &&
+            notify_get_state(qOffsetStateToken, &ostate) == NOTIFY_STATUS_OK &&
+            ostate >= 1 && ostate <= 40001) {
+            shiftY = (ostate - 1) / 100.0 - 200;
+            gotOffset = YES;
+        }
+        if (!gotOffset) {
+            // 直接读文件不依赖缓存，确保拿到持久化的值
+            shiftY = [QReadArtworkSettings()[@"largeArtworkOffsetY"] doubleValue];
+        }
+        shiftY = isfinite(shiftY) ? MAX(-200, MIN(200, shiftY)) : 0;
+    }
     CATransform3D scaled = CATransform3DMakeAffineTransform(
         CGAffineTransformMake(scale, 0, 0, scale,
                               center.x * (1 - scale) + offset.x,
-                              center.y * (1 - scale) + offset.y));
+                              center.y * (1 - scale) + offset.y + shiftY));
     if (CATransform3DEqualToTransform(container.layer.sublayerTransform, scaled)) return;
+    objc_setAssociatedObject(container.layer, kQLastShiftYKey, @(shiftY), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     container.layer.sublayerTransform = scaled;
@@ -296,7 +319,8 @@ static void QStyleNativeArtwork(UIView *view) {
     UIView *ringHost = image.superview ?: view;
     QApplyArtworkScale(image);
     CGFloat roundness = QArtworkRoundness();
-    CGFloat radius = MIN(image.bounds.size.width, image.bounds.size.height) * roundness / 2;
+    CGFloat side = MIN(image.bounds.size.width, image.bounds.size.height);
+    CGFloat radius = side * roundness / 2;
     // MRUArtworkView also masks a square wrapper around the image. Styling
     // only artworkImageView leaves that wrapper circular at every slider value.
     for (UIView *part = image; part; part = part.superview) {
@@ -367,6 +391,22 @@ static void QStyleNativeArtwork(UIView *view) {
         id value = ((id (*)(id, SEL))objc_msgSend)(view, @selector(artworkImage));
         if ([value isKindOfClass:UIImage.class]) artwork = value;
     }
+    // Keep the native layout, but show rectangular artwork through a centered
+    // square mask. The progress ring uses the same square below.
+    CAShapeLayer *squareMask = objc_getAssociatedObject(image, qSquareMaskKey);
+    if (fabs(image.bounds.size.width - image.bounds.size.height) > 1) {
+        CGRect square = CGRectMake((image.bounds.size.width - side) / 2,
+                                   (image.bounds.size.height - side) / 2, side, side);
+        if (!squareMask) {
+            squareMask = [CAShapeLayer layer];
+            objc_setAssociatedObject(image, qSquareMaskKey, squareMask, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        squareMask.frame = image.bounds;
+        squareMask.path = [UIBezierPath bezierPathWithRoundedRect:square cornerRadius:radius].CGPath;
+        image.layer.mask = squareMask;
+    } else if (squareMask && image.layer.mask == squareMask) {
+        image.layer.mask = nil;
+    }
     UIImage *previousArtwork = objc_getAssociatedObject(view, qAccentImageKey);
     UIColor *accent = objc_getAssociatedObject(view, qAccentColorKey);
     if (!accent || previousArtwork != artwork) {
@@ -383,7 +423,8 @@ static void QStyleNativeArtwork(UIView *view) {
                     [qArtworkSettings[@"showProgress"] boolValue];
     track.hidden = !showRing;
     ring.hidden = !showRing;
-    CGRect imageFrame = image.frame;
+    CGRect imageFrame = CGRectMake(CGRectGetMidX(image.frame) - side / 2,
+                                   CGRectGetMidY(image.frame) - side / 2, side, side);
     CGRect ringFrame = CGRectInset(imageFrame, -7, -7);
     CGFloat ringRadius = roundness > 0 ?
         MIN(MIN(imageFrame.size.width, imageFrame.size.height) * roundness / 2 + 7,
@@ -479,6 +520,7 @@ static void QNativeArtworkSeekChanged(CFNotificationCenterRef center, void *obse
 
 void QInstallNativeArtworkHooks(void) {
     notify_register_check("com.gushi.quart17/playercorner", &qCornerStateToken);
+    notify_register_check("com.gushi.quart17/artworkoffset", &qOffsetStateToken);
     notify_register_check("com.gushi.quart17/artworkseek", &qSeekStateToken);
     qArtworkTapObserver = [QNativeArtworkTapObserver new];
     qArtworkViews = [NSHashTable weakObjectsHashTable];

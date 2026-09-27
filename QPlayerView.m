@@ -3,7 +3,13 @@
 #import <QuartzCore/CADisplayLink.h>
 #import <dlfcn.h>
 #import <objc/message.h>
+#ifdef Q_ROOTHIDE
 #import <roothide.h>
+#define QJbroot(path) jbroot(path)
+#else
+// 标准 Rootless：直接使用 /var/jb 前缀
+#define QJbroot(path) [@"/var/jb" stringByAppendingString:(path)]
+#endif
 #import <notify.h>
 #import <math.h>
 
@@ -143,7 +149,7 @@ static BOOL QLoadMediaRemote(void) {
 @end
 
 static UIImage *QButtonArtwork(NSString *name, CGFloat size) {
-    NSString *directory = jbroot(@"/Library/Application Support/Quart17/Buttons");
+    NSString *directory = QJbroot(@"/Library/Application Support/Quart17/Buttons");
     NSString *path = [directory stringByAppendingPathComponent:[name stringByAppendingPathExtension:@"png"]];
     UIImage *image = [UIImage imageWithContentsOfFile:path];
     if (!image) return nil;
