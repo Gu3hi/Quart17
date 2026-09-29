@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>items</key><array>
+<dict><key>cell</key><string>PSGroupCell</string><key>label</key><string>弹窗玻璃</string><key>footerText</key><string>系统弹窗、长按菜单、快捷操作按钮与 Dock 使用这里的玻璃参数，与通知玻璃独立调节。</string></dict>
+<dict><key>cell</key><string>PSStaticTextCell</string><key>cellClass</key><string>QWidthSliderCell</string><key>label</key><string>模糊强度</string><key>key</key><string>alertGlassBlur</string><key>default</key><real>8</real><key>min</key><real>0</real><key>max</key><real>18</real><key>unit</key><string>pt</string></dict>
+<dict><key>cell</key><string>PSStaticTextCell</string><key>cellClass</key><string>QWidthSliderCell</string><key>label</key><string>边缘折射</string><key>key</key><string>alertGlassRefraction</string><key>default</key><real>12</real><key>min</key><real>0</real><key>max</key><real>24</real><key>unit</key><string>pt</string></dict>
+<dict><key>cell</key><string>PSStaticTextCell</string><key>cellClass</key><string>QWidthSliderCell</string><key>label</key><string>高光强度</string><key>key</key><string>alertGlassHighlight</string><key>default</key><real>0.5</real><key>min</key><real>0</real><key>max</key><real>1</real></dict>
+<dict><key>cell</key><string>PSStaticTextCell</string><key>cellClass</key><string>QWidthSliderCell</string><key>label</key><string>底色浓度</string><key>key</key><string>alertVeil</string><key>default</key><real>28</real><key>min</key><real>0</real><key>max</key><real>30</real></dict>
+<dict><key>cell</key><string>PSSwitchCell</string><key>label</key><string>强制深色模式</string><key>key</key><string>alertForceDark</string><key>default</key><true/><key>get</key><string>readPreferenceValue:</string><key>set</key><string>setPreferenceValue:specifier:</string></dict>
+<dict><key>cell</key><string>PSSwitchCell</string><key>label</key><string>Dock 玻璃</string><key>key</key><string>dockGlass</string><key>default</key><true/><key>get</key><string>readPreferenceValue:</string><key>set</key><string>setPreferenceValue:specifier:</string></dict>
+</array></dict></plist>

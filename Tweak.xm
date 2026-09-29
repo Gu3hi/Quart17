@@ -5,6 +5,7 @@
 #import <stdlib.h>
 #import <notify.h>
 #import <math.h>
+#import <dlfcn.h>
 #include <algorithm>
 #include <vector>
 #import "QPlayerView.h"
@@ -20,6 +21,11 @@ static NSHashTable<UIView *> *qActiveNotifications;
 static NSHashTable<UIView *> *qActiveLists;
 static NSHashTable<UIView *> *qActiveBanners;
 static NSHashTable<UIView *> *qActiveQuickActionButtons;
+static NSHashTable<UIView *> *qActiveControlCenterBackgrounds;
+static NSHashTable<UIView *> *qActiveControlCenterExpandedMaterials;
+static NSMapTable<UIView *, UIView *> *qGlassOwners;
+static NSMapTable<UIView *, NSNumber *> *qAlertOriginalStyles;
+static void *QGlassOriginalStateKey = &QGlassOriginalStateKey;
 static UIWindow *qTestBannerWindow;
 static UIView *qTestBannerMaterial;
 static UILabel *qTestBannerTitle;
@@ -35,6 +41,12 @@ static void *QBannerOriginalTransformKey = &QBannerOriginalTransformKey;
 static void *QBannerOwnedTransformKey = &QBannerOwnedTransformKey;
 static void *QBannerShadowHiddenKey = &QBannerShadowHiddenKey;
 static void *QBannerGlassKey = &QBannerGlassKey;
+static void *QCCContentClipKey = &QCCContentClipKey;
+static void *QCCExpandedGlassKey = &QCCExpandedGlassKey;
+static void *QCCPrimaryExpandedGlassKey = &QCCPrimaryExpandedGlassKey;
+static void *QCCOverlayMaterialAlphaKey = &QCCOverlayMaterialAlphaKey;
+static void *QSystemAlertRadiusKey = &QSystemAlertRadiusKey;
+static void *QSystemAlertCornerCurveKey = &QSystemAlertCornerCurveKey;
 static void *QToggleGlassProxyKey = &QToggleGlassProxyKey;
 static void *QBannerGlassSheenKey = &QBannerGlassSheenKey;
 static void *QBannerGlassRimKey = &QBannerGlassRimKey;
@@ -45,6 +57,7 @@ static void *QBannerGlassMeshKey = &QBannerGlassMeshKey;
 static void *QBannerGlassStyleKey = &QBannerGlassStyleKey;
 static void *QBannerGlassCompatibilityKey = &QBannerGlassCompatibilityKey;
 static void *QLockGlassShadowHiddenKey = &QLockGlassShadowHiddenKey;
+static void *QCCNativeMaterialHiddenKey = &QCCNativeMaterialHiddenKey;
 static void *QLockOriginalInterfaceStyleKey = &QLockOriginalInterfaceStyleKey;
 static void *QCountBadgeKey = &QCountBadgeKey;
 static void *QStackKeyKey = &QStackKeyKey;
@@ -72,6 +85,8 @@ static void *QSearchPanQualifiedKey = &QSearchPanQualifiedKey;
 
 static void QStyle(UIView *root);
 static void QStyleQuickActionButton(UIView *button);
+static void QApplyGlassSurface(UIView *root, UIView *material, BOOL quickAction);
+static void QStyleSystemAlert(UIView *alert);
 static CGFloat QSharedCornerRadius(CGFloat height) {
     CGFloat roundness = [qSettings[@"playerCornerRoundness"] doubleValue];
     roundness = isfinite(roundness) ? MAX(0, MIN(1, roundness)) : 1;
@@ -101,10 +116,13 @@ static void QLoadSettings(void) {
                     @"roundIcons": @YES,
                     @"playerEnabled": @YES, @"disableListScaling": @NO,
                     @"scaleBanners": @NO, @"glassBanners": @NO,
+                    @"controlCenterGlass": @YES, @"folderGlass": @YES,
                     @"showNotificationCount": @YES,
                     @"playerAppearance": @0,
                     @"largeArtworkOffsetY": @0,
                     @"glassBlur": @8, @"glassRefraction": @12, @"glassHighlight": @0.5,
+                    @"alertGlassBlur": @8, @"alertGlassRefraction": @12, @"alertGlassHighlight": @0.5,
+                    @"alertVeil": @28, @"alertForceDark": @YES, @"dockGlass": @YES,
                     @"desktopVeil": @28, @"lockVeil": @28,
                     @"clearAllEnabled": @YES, @"clearHapticEnabled": @YES,
                     @"showProgress": @YES, @"backgroundProgress": @YES, @"hideRoute": @YES,
@@ -162,6 +180,17 @@ static void QChanged(CFNotificationCenterRef center, void *observer, CFStringRef
         }
         for (UIView *notification in qActiveNotifications.allObjects) QStyle(notification);
         for (UIView *button in qActiveQuickActionButtons.allObjects) QStyleQuickActionButton(button);
+        for (UIView *material in qGlassOwners.keyEnumerator.allObjects) {
+            UIView *owner = [qGlassOwners objectForKey:material];
+            if (owner) QApplyGlassSurface(owner, material,
+                objc_getAssociatedObject(material, QSystemAlertRadiusKey) != nil);
+        }
+        for (UIView *alert in qAlertOriginalStyles.keyEnumerator.allObjects)
+            QStyleSystemAlert(alert);
+        for (UIView *background in qActiveControlCenterBackgrounds.allObjects)
+            QApplyGlassSurface(background, background, NO);
+        for (UIView *material in qActiveControlCenterExpandedMaterials.allObjects)
+            QApplyGlassSurface(material, material, NO);
         for (UIView *list in qActiveLists.allObjects) QScheduleListScaling(list);
         for (UIView *banner in qActiveBanners.allObjects) QApplyBannerScaling(banner);
         QRefreshTestBanner();
@@ -583,21 +612,191 @@ static void QSetLockGlassShadowHidden(UIView *material, BOOL hidden) {
     }
 }
 
+static void QSetControlCenterNativeMaterialHidden(UIView *background, BOOL hidden) {
+    UIView *host = background.superview;
+    if (!host) return;
+    NSMutableArray<UIView *> *pending = [NSMutableArray arrayWithObject:host];
+    while (pending.count) {
+        UIView *view = pending.lastObject;
+        [pending removeLastObject];
+        NSString *name = NSStringFromClass(view.class);
+        if (view != background &&
+            ([name isEqualToString:@"MTMaterialView"] || [name containsString:@"MTShadowView"]) &&
+            ((!hidden && objc_getAssociatedObject(view, QCCNativeMaterialHiddenKey)) ||
+             (fabs(view.bounds.size.width - background.bounds.size.width) < 2 &&
+              fabs(view.bounds.size.height - background.bounds.size.height) < 2))) {
+            NSNumber *original = objc_getAssociatedObject(view, QCCNativeMaterialHiddenKey);
+            if (hidden) {
+                if (!original)
+                    objc_setAssociatedObject(view, QCCNativeMaterialHiddenKey, @(view.hidden), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                view.hidden = YES;
+            } else if (original) {
+                view.hidden = original.boolValue;
+                objc_setAssociatedObject(view, QCCNativeMaterialHiddenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+        }
+        [pending addObjectsFromArray:view.subviews];
+    }
+}
+
+static CGFloat QControlCenterCornerRadius(CGSize size) {
+    CGFloat shortSide = MIN(size.width, size.height);
+    if (shortSide <= 90)
+        return MAX(size.width, size.height) > shortSide * 1.4 ?
+            shortSide / 2 : MIN(24, shortSide / 3);
+    return MIN(32, shortSide / 4);
+}
+
+static void QSetControlCenterContentClipped(UIView *background, BOOL clipped) {
+    for (UIView *view in background.superview.subviews) {
+        if (![NSStringFromClass(view.class) isEqualToString:@"CCUIContentModuleContentContainerView"])
+            continue;
+        // The two large top modules manage several inner controls and their
+        // own transition masks; clipping that shared container survives expansion.
+        BOOL composite = MIN(view.bounds.size.width, view.bounds.size.height) >= 150;
+        if (composite) clipped = NO;
+        NSArray *original = objc_getAssociatedObject(view, QCCContentClipKey);
+        if (clipped) {
+            if (!original)
+                objc_setAssociatedObject(view, QCCContentClipKey,
+                    @[@(view.clipsToBounds), @(view.layer.cornerRadius), view.layer.cornerCurve ?: kCACornerCurveCircular],
+                    OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            view.layer.cornerRadius = QControlCenterCornerRadius(view.bounds.size);
+            view.layer.cornerCurve = kCACornerCurveCircular;
+            view.clipsToBounds = YES;
+        } else if (original) {
+            view.clipsToBounds = [original[0] boolValue];
+            view.layer.cornerRadius = [original[1] doubleValue];
+            view.layer.cornerCurve = original[2];
+            objc_setAssociatedObject(view, QCCContentClipKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+    }
+}
+
+static BOOL QIsControlCenterExpandedMaterial(UIView *view) {
+    if (![NSStringFromClass(view.class) isEqualToString:@"MTMaterialView"]) return NO;
+    CGSize size = view.bounds.size;
+    CGSize screen = UIScreen.mainScreen.bounds.size;
+    BOOL tall = size.width < 250 && size.height > size.width * 1.5;
+    if (size.width < 36 || size.height < 36 ||
+        size.width >= MIN(screen.width, screen.height) - 10 ||
+        size.height > MAX(screen.width, screen.height) * 0.72) return NO;
+    if (tall && ![NSStringFromClass(view.superview.class)
+                  isEqualToString:@"_CCUIBaseSliderContentView"]) return NO;
+    if (QHasAncestor(view, @"CCUIContentModuleContainerView")) return NO;
+    for (UIResponder *responder = view; responder; responder = responder.nextResponder)
+        if ([NSStringFromClass(responder.class) isEqualToString:@"CCUIContentModuleContainerViewController"])
+            return YES;
+    return QHasAncestor(view, @"CCUIContentModuleContentContainerView");
+}
+
+static void QUpdateControlCenterOverlayBackground(UIView *view, UIWindow *incomingWindow) {
+    CGSize screen = UIScreen.mainScreen.bounds.size;
+    CGSize size = view.bounds.size;
+    if (size.width < 2 || size.height < 2) size = view.superview.bounds.size;
+    BOOL fullScreen = fabs(size.width - screen.width) < 2 &&
+        fabs(size.height - screen.height) < 2;
+    BOOL controlCenterWindow = [NSStringFromClass((incomingWindow ?: view.window).class)
+        containsString:@"ControlCenterWindow"];
+    NSNumber *original = objc_getAssociatedObject(view, QCCOverlayMaterialAlphaKey);
+    BOOL backdropOnly = fullScreen && controlCenterWindow &&
+        !QHasAncestor(view, @"CCUIContentModuleContentContainerView") &&
+        !QHasAncestor(view, @"CCUIContentModuleContainerView") &&
+         !QFind(view, @"CCUISteppedSliderView") &&
+         !QFind(view, @"CCUIContentModuleContainerView") &&
+        !QFind(view, @"CCUIContentModuleContentContainerView");
+    if (backdropOnly) {
+        if (!original)
+            objc_setAssociatedObject(view, QCCOverlayMaterialAlphaKey, @(view.alpha), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        CGFloat targetAlpha = (original ? original.doubleValue : view.alpha) * 0.55;
+        [UIView performWithoutAnimation:^{ view.alpha = targetAlpha; }];
+    } else if (original) {
+        [UIView performWithoutAnimation:^{ view.alpha = original.doubleValue; }];
+        objc_setAssociatedObject(view, QCCOverlayMaterialAlphaKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
 static void QApplyGlassSurface(UIView *root, UIView *material, BOOL quickAction) {
     if (!material) return;
     UIVisualEffectView *glass = objc_getAssociatedObject(material, QBannerGlassKey);
+    BOOL controlCenterBackground = [material isKindOfClass:objc_getClass("CCUIContentModuleBackgroundView")];
+    BOOL controlCenterModule = controlCenterBackground &&
+        QHasAncestor(material, @"CCUIContentModuleContainerView");
+    BOOL controlCenterSlider = controlCenterModule &&
+        (material.bounds.size.height > material.bounds.size.width * 1.5 ||
+         material.superview.bounds.size.height > material.superview.bounds.size.width * 1.5 ||
+         QFind(material.superview, @"CCUIContinuousSliderView"));
+    if (controlCenterBackground && !controlCenterModule && !glass) return;
+    BOOL controlCenterExpanded = QIsControlCenterExpandedMaterial(material);
+    BOOL folderBackground = [NSStringFromClass(material.class) isEqualToString:@"SBFolderBackgroundView"] ||
+        QHasAncestor(material, @"SBFolderBackgroundView") || QHasAncestor(material, @"SBFolderIconView") || QHasAncestor(material, @"SBIconView");
+    BOOL dockBackground = QHasAncestor(material, @"SBDockView") || QHasAncestor(material, @"SBFloatingDockView");
+    BOOL popupGlass = quickAction || dockBackground;
+    NSNumber *systemAlertRadius = objc_getAssociatedObject(material, QSystemAlertRadiusKey);
+    BOOL collapsedPrimary = [objc_getAssociatedObject(material, QCCPrimaryExpandedGlassKey) boolValue] &&
+        material.bounds.size.width <= 170 && material.bounds.size.height <= 170;
+    if (collapsedPrimary) {
+        CGFloat compactRadius = QControlCenterCornerRadius(material.bounds.size);
+        material.layer.cornerRadius = compactRadius;
+        material.superview.layer.cornerRadius = compactRadius;
+        [glass removeFromSuperview];
+        objc_setAssociatedObject(material, QBannerGlassKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(material, QCCExpandedGlassKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(material, QCCPrimaryExpandedGlassKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        material.hidden = YES;
+        return;
+    }
+    BOOL retiredExpandedMaterial = !controlCenterExpanded &&
+        [objc_getAssociatedObject(material, QCCExpandedGlassKey) boolValue];
+    if (controlCenterExpanded) {
+        objc_setAssociatedObject(material, QCCExpandedGlassKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        BOOL tallSliderShell = material.bounds.size.width < 250 &&
+            material.bounds.size.height > material.bounds.size.width * 1.5;
+        if ((material.bounds.size.width >= 250 && material.bounds.size.height >= 200) ||
+            tallSliderShell)
+            objc_setAssociatedObject(material, QCCPrimaryExpandedGlassKey, @YES,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
     BOOL enabled = [qSettings[@"masterEnabled"] boolValue] &&
-        [qSettings[@"enabled"] boolValue] && [qSettings[@"glassBanners"] boolValue] &&
-        (quickAction || QIsDesktopBanner(root) || QIsLockScreenNotification(root));
+        (controlCenterBackground ? (controlCenterModule && [qSettings[@"controlCenterGlass"] boolValue]) :
+         controlCenterExpanded ? [qSettings[@"controlCenterGlass"] boolValue] :
+         folderBackground ? ([qSettings[@"enabled"] boolValue] && [qSettings[@"folderGlass"] boolValue]) :
+         dockBackground ? [qSettings[@"dockGlass"] boolValue] :
+          systemAlertRadius ? YES :
+          (!retiredExpandedMaterial && [qSettings[@"enabled"] boolValue] &&
+          [qSettings[@"glassBanners"] boolValue] &&
+          (quickAction || QIsDesktopBanner(root) || QIsLockScreenNotification(root))));
     if (!enabled || !material.superview) {
         [glass removeFromSuperview];
         objc_setAssociatedObject(material, QBannerGlassKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        material.hidden = NO;
+        NSArray *original = objc_getAssociatedObject(material, QGlassOriginalStateKey);
+        if (original) {
+            material.hidden = [original[0] boolValue];
+            material.layer.cornerRadius = [original[1] doubleValue];
+            material.layer.cornerCurve = original[2];
+            objc_setAssociatedObject(material, QGlassOriginalStateKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        [qGlassOwners removeObjectForKey:material];
         if (!quickAction) QSetLockGlassShadowHidden(material, NO);
+        if (controlCenterBackground) {
+            QSetControlCenterNativeMaterialHidden(material, NO);
+            QSetControlCenterContentClipped(material, NO);
+        }
         return;
     }
     BOOL lockNotification = QIsLockScreenNotification(root);
-    if (!quickAction) QSetLockGlassShadowHidden(material, lockNotification);
+    if (!objc_getAssociatedObject(material, QGlassOriginalStateKey))
+        objc_setAssociatedObject(material, QGlassOriginalStateKey,
+            @[@(material.hidden), @(material.layer.cornerRadius), material.layer.cornerCurve ?: kCACornerCurveCircular],
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (!qGlassOwners) qGlassOwners = [NSMapTable weakToWeakObjectsMapTable];
+    [qGlassOwners setObject:root forKey:material];
+    if (!quickAction) QSetLockGlassShadowHidden(material,
+        (controlCenterModule && !controlCenterSlider) || lockNotification);
+    if (controlCenterModule) {
+        QSetControlCenterNativeMaterialHidden(material, !controlCenterSlider);
+        QSetControlCenterContentClipped(material, !controlCenterSlider);
+    }
     // Both banner locations use the same live backdrop renderer. The lock
     // cell's appearance is fixed separately so its folded material is dark.
     BOOL compatibleLockGlass = NO;
@@ -664,16 +863,17 @@ static void QApplyGlassSurface(UIView *root, UIView *material, BOOL quickAction)
     // glass treatment while keeping that independent appearance choice.
     // Match the Lock Screen notification's dark glass. A separate light veil
     // made the native shortcut disks much more opaque than the cards.
-    BOOL dark = quickAction || lockNotification || systemDark;
+    BOOL dark = controlCenterModule || controlCenterExpanded || lockNotification || systemDark;
+    if (popupGlass) dark = [qSettings[@"alertForceDark"] boolValue] ? YES : systemDark;
     if (compatibleLockGlass) {
         CALayer *oldBackdrop = objc_getAssociatedObject(glass, QBannerGlassBackdropKey);
         [oldBackdrop removeFromSuperlayer];
         objc_setAssociatedObject(glass, QBannerGlassBackdropKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(glass, QBannerGlassBlurKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    CGFloat blurRadius = [qSettings[@"glassBlur"] doubleValue];
-    CGFloat refraction = [qSettings[@"glassRefraction"] doubleValue];
-    CGFloat highlight = [qSettings[@"glassHighlight"] doubleValue];
+    CGFloat blurRadius = [qSettings[popupGlass ? @"alertGlassBlur" : @"glassBlur"] doubleValue];
+    CGFloat refraction = [qSettings[popupGlass ? @"alertGlassRefraction" : @"glassRefraction"] doubleValue];
+    CGFloat highlight = [qSettings[popupGlass ? @"alertGlassHighlight" : @"glassHighlight"] doubleValue];
     blurRadius = isfinite(blurRadius) ? MAX(0, MIN(18, blurRadius)) : 8;
     refraction = isfinite(refraction) ? MAX(0, MIN(24, refraction)) : 12;
     highlight = isfinite(highlight) ? MAX(0, MIN(1, highlight)) : 0.5;
@@ -703,21 +903,70 @@ static void QApplyGlassSurface(UIView *root, UIView *material, BOOL quickAction)
     // Desktop and lock screen veils are user-adjustable separately
     // (desktopVeil / lockVeil, 0-30, real-time).
     CGFloat veilPct = lockNotification ? [qSettings[@"lockVeil"] doubleValue]
+                                       : popupGlass ? [qSettings[@"alertVeil"] doubleValue]
                                        : [qSettings[@"desktopVeil"] doubleValue];
     veilPct = isfinite(veilPct) ? MAX(0, MIN(30, veilPct)) : 28;
     CGFloat veil = veilPct / 100.0;
+    if (controlCenterModule || controlCenterExpanded) veil = MIN(veil, 0.14);
     glass.contentView.backgroundColor = dark ? [UIColor colorWithWhite:0 alpha:veil] :
         [UIColor colorWithWhite:1 alpha:veil];
     glass.frame = material.frame;
-    glass.autoresizingMask = material.autoresizingMask;
+    glass.autoresizingMask = (controlCenterBackground || controlCenterExpanded) ?
+        UIViewAutoresizingNone : material.autoresizingMask;
     CALayer *backdrop = objc_getAssociatedObject(glass, QBannerGlassBackdropKey);
     backdrop.frame = glass.bounds;
     id blurFilter = objc_getAssociatedObject(glass, QBannerGlassBlurKey);
     if (blurFilter) [blurFilter setValue:@(blurRadius) forKey:@"inputRadius"];
-    CGFloat cardRadius = quickAction ? MIN(glass.bounds.size.width, glass.bounds.size.height) / 2 :
-        MIN(root.layer.cornerRadius, MIN(glass.bounds.size.width, glass.bounds.size.height) / 2);
-    if (!quickAction) material.layer.cornerRadius = cardRadius;
+    CGFloat shortSide = MIN(glass.bounds.size.width, glass.bounds.size.height);
+    CGFloat nativeRadius = material.layer.cornerRadius;
+    if (controlCenterExpanded && nativeRadius < 1) {
+        for (UIView *child in material.subviews)
+            nativeRadius = MAX(nativeRadius, child.layer.cornerRadius);
+        if (nativeRadius < 1) nativeRadius = material.superview.layer.cornerRadius;
+        if (nativeRadius < 1) nativeRadius = MIN(48, shortSide / 6);
+    }
+    CGFloat cardRadius;
+    if (folderBackground) {
+        CGFloat folderR = MAX(material.layer.cornerRadius, root.layer.cornerRadius);
+        if (folderR < 1) {
+            for (UIView *child in material.subviews)
+                folderR = MAX(folderR, child.layer.cornerRadius);
+        }
+        cardRadius = folderR >= 1 ? MIN(folderR, shortSide / 2) : shortSide * 0.24;
+    } else if (dockBackground) {
+        CGFloat dockR = MAX(material.layer.cornerRadius, root.layer.cornerRadius);
+        if (dockR < 1) {
+            for (UIView *child in material.subviews)
+                dockR = MAX(dockR, child.layer.cornerRadius);
+            if (dockR < 1) dockR = material.superview.layer.cornerRadius;
+        }
+        cardRadius = dockR >= 1 ? MIN(dockR, shortSide / 2) : 28;
+    } else {
+        cardRadius = systemAlertRadius ?
+            MIN(systemAlertRadius.doubleValue, shortSide / 2) : controlCenterModule ?
+            QControlCenterCornerRadius(glass.bounds.size) :
+            (controlCenterExpanded ? MIN(nativeRadius, shortSide / 2) :
+             (quickAction ? shortSide / 2 : MIN(root.layer.cornerRadius, shortSide / 2)));
+    }
+    if (!quickAction && !controlCenterExpanded && !controlCenterModule)
+        material.layer.cornerRadius = cardRadius;
+    if (controlCenterModule) {
+        material.layer.cornerRadius = cardRadius;
+        for (UIView *sibling in material.superview.subviews) {
+            BOOL sameSize = fabs(sibling.bounds.size.width - material.bounds.size.width) < 2 &&
+                fabs(sibling.bounds.size.height - material.bounds.size.height) < 2;
+            NSString *name = NSStringFromClass(sibling.class);
+            if (sameSize && ([name isEqualToString:@"MTMaterialView"] ||
+                             [name isEqualToString:@"CCUIContentModuleContentContainerView"]))
+                sibling.layer.cornerRadius = cardRadius;
+        }
+    }
     glass.layer.cornerRadius = cardRadius;
+    if (systemAlertRadius) {
+        CALayerCornerCurve curve = objc_getAssociatedObject(material, QSystemAlertCornerCurveKey);
+        glass.layer.cornerCurve = curve ?: kCACornerCurveContinuous;
+    }
+    if (folderBackground || dockBackground) glass.layer.cornerCurve = kCACornerCurveContinuous;
     QUpdateGlassRefraction(backdrop, glass.bounds.size, glass.layer.cornerRadius,
                            refraction * 0.65, glass);
     // The gradient rim supplies the only outline. A second layer border made
@@ -740,6 +989,8 @@ static void QApplyGlassSurface(UIView *root, UIView *material, BOOL quickAction)
     CGFloat inset = rimMask.borderWidth / 2;
     rimMask.frame = CGRectInset(rim.bounds, inset, inset);
     rimMask.cornerRadius = MAX(0, cardRadius - inset);
+    if (systemAlertRadius)
+        rimMask.cornerCurve = glass.layer.cornerCurve;
     rim.colors = dark ? @[(id)[UIColor colorWithWhite:1 alpha:0.34 * highlight].CGColor,
                           (id)[UIColor colorWithWhite:1 alpha:0.12 * highlight].CGColor,
                           (id)[UIColor colorWithWhite:1 alpha:0.04 * highlight].CGColor,
@@ -748,9 +999,29 @@ static void QApplyGlassSurface(UIView *root, UIView *material, BOOL quickAction)
                           (id)[UIColor colorWithWhite:1 alpha:0.18 * highlight].CGColor,
                           (id)[UIColor colorWithWhite:0 alpha:0.08 * highlight].CGColor,
                           (id)[UIColor colorWithWhite:1 alpha:0.28 * highlight].CGColor];
-    if (glass.superview != material.superview)
-        [material.superview insertSubview:glass aboveSubview:material];
-    material.hidden = YES;
+    if (controlCenterExpanded) {
+        glass.frame = material.frame;
+        if (glass.superview != material.superview) {
+            [glass removeFromSuperview];
+            [material.superview insertSubview:glass aboveSubview:material];
+        }
+        material.hidden = YES;
+    } else {
+        UIView *content = nil;
+        if (controlCenterModule) {
+            for (UIView *sibling in material.superview.subviews) {
+                if ([NSStringFromClass(sibling.class) isEqualToString:@"CCUIContentModuleContentContainerView"]) {
+                    content = sibling;
+                    break;
+                }
+            }
+        }
+        if (content)
+            [material.superview insertSubview:glass belowSubview:content];
+        else
+            [material.superview insertSubview:glass aboveSubview:material];
+        material.hidden = !controlCenterSlider;
+    }
 }
 
 // Folded-stack support for the count badge: find the notification views that
@@ -1666,6 +1937,487 @@ extern "C" void QInstallNativeArtworkHooks(void);
 %end
 %end
 
+static void QStyleSystemAlert(UIView *alert) {
+    NSNumber *originalStyle = [qAlertOriginalStyles objectForKey:alert];
+    if (![qSettings[@"masterEnabled"] boolValue]) {
+        if (originalStyle) alert.overrideUserInterfaceStyle = (UIUserInterfaceStyle)originalStyle.integerValue;
+        [qAlertOriginalStyles removeObjectForKey:alert];
+        return;
+    }
+    if (!alert.window) return;
+    if (!qAlertOriginalStyles) qAlertOriginalStyles = [NSMapTable weakToStrongObjectsMapTable];
+    if (!originalStyle) {
+        originalStyle = @(alert.overrideUserInterfaceStyle);
+        [qAlertOriginalStyles setObject:originalStyle forKey:alert];
+    }
+    // Force the entire popup (not just our glass) into dark appearance when
+    // the user enables it, even if the system is in light mode.
+    UIUserInterfaceStyle forcedStyle = [qSettings[@"alertForceDark"] boolValue] ?
+        UIUserInterfaceStyleDark : (UIUserInterfaceStyle)originalStyle.integerValue;
+    if (alert.overrideUserInterfaceStyle != forcedStyle)
+        alert.overrideUserInterfaceStyle = forcedStyle;
+    UIView *material = nil;
+    CGFloat largestArea = 0;
+    NSMutableArray<UIView *> *pending = [NSMutableArray arrayWithArray:alert.subviews];
+    while (pending.count) {
+        UIView *view = pending.lastObject;
+        [pending removeLastObject];
+        NSString *name = NSStringFromClass(view.class);
+        if ([name isEqualToString:@"_UIDimmingKnockoutBackdropView"]) {
+            for (UIView *child in view.subviews) {
+                if ([child isKindOfClass:UIVisualEffectView.class] &&
+                    !objc_getAssociatedObject(child, QBannerGlassCompatibilityKey)) {
+                    material = child;
+                    break;
+                }
+            }
+            if (material) break;
+        }
+        CGFloat area = view.bounds.size.width * view.bounds.size.height;
+        if (([view isKindOfClass:UIVisualEffectView.class] ||
+             [name isEqualToString:@"MTMaterialView"]) &&
+            !objc_getAssociatedObject(view, QBannerGlassCompatibilityKey) && area > largestArea) {
+            material = view;
+            largestArea = area;
+        }
+        [pending addObjectsFromArray:view.subviews];
+    }
+    if (!material || material.bounds.size.width < 120 || material.bounds.size.height < 44) return;
+    CGFloat nativeRadius = 24;
+    CALayerCornerCurve nativeCurve = kCACornerCurveContinuous;
+    objc_setAssociatedObject(material, QSystemAlertRadiusKey, @(nativeRadius),
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(material, QSystemAlertCornerCurveKey,
+                             nativeCurve ?: kCACornerCurveContinuous,
+                             OBJC_ASSOCIATION_COPY_NONATOMIC);
+    QApplyGlassSurface(alert, material, YES);
+}
+
+#pragma mark - 文件夹玻璃
+
+static void QStyleFolderBackground(UIView *background) {
+    if (!background.window || ![qSettings[@"masterEnabled"] boolValue]) return;
+    UIView *material = nil;
+    CGFloat largestArea = 0;
+    NSMutableArray<UIView *> *pending = [NSMutableArray arrayWithArray:background.subviews];
+    while (pending.count) {
+        UIView *view = pending.lastObject;
+        [pending removeLastObject];
+        // Never pick our own glass as the native material.
+        if (objc_getAssociatedObject(view, QBannerGlassCompatibilityKey)) continue;
+        NSString *name = NSStringFromClass(view.class);
+        if ([view isKindOfClass:UIVisualEffectView.class] ||
+            [name isEqualToString:@"MTMaterialView"] ||
+            [name isEqualToString:@"_UIBackdropView"]) {
+            CGFloat area = view.bounds.size.width * view.bounds.size.height;
+            if (area > largestArea) {
+                largestArea = area;
+                material = view;
+            }
+        }
+        [pending addObjectsFromArray:view.subviews];
+    }
+    // Only replace a real inner material. If the background draws its
+    // own blur without a material subview, leave it alone rather than
+    // hiding the container (icons may be descendants).
+    if (!material) return;
+    QApplyGlassSurface(background, material, NO);
+}
+
+static void QStyleFolderIcon(UIView *iconView) {
+    if (!iconView.window || ![qSettings[@"masterEnabled"] boolValue]) return;
+    // Locate folder icon content: the class name contains "Folder" plus an
+    // image marker. (FLEX shows SBFolderIconImageView on iOS 17, but be
+    // lenient about framework prefixes like SBF.)
+    UIView *imageView = nil;
+    NSMutableArray<UIView *> *pending = [NSMutableArray arrayWithArray:iconView.subviews];
+    while (pending.count && !imageView) {
+        UIView *view = pending.lastObject;
+        [pending removeLastObject];
+        NSString *name = NSStringFromClass(view.class);
+        if ([name rangeOfString:@"Folder"].location != NSNotFound &&
+            ([name rangeOfString:@"Image"].location != NSNotFound ||
+             [name rangeOfString:@"Icon"].location != NSNotFound))
+            imageView = view;
+        else
+            [pending addObjectsFromArray:view.subviews];
+    }
+    if (!imageView) return;
+    // The real background is a material view (MTMaterialView on iOS 17)
+    // next to the image content, possibly inside a shared container.
+    // Descend everywhere except into the icon content itself; never pick
+    // the icon content, its descendants, or a container holding it.
+    // No minimum area: bounds can still be zero on the first layout pass.
+    UIView *background = nil;
+    pending = [NSMutableArray arrayWithArray:iconView.subviews];
+    while (pending.count && !background) {
+        UIView *view = pending.lastObject;
+        [pending removeLastObject];
+        if (view != imageView) [pending addObjectsFromArray:view.subviews];
+        if (view == imageView) continue;
+        if ([view isDescendantOfView:imageView]) continue;
+        if ([imageView isDescendantOfView:view]) continue;
+        if (objc_getAssociatedObject(view, QBannerGlassCompatibilityKey)) continue;
+        NSString *name = NSStringFromClass(view.class);
+        if ([name rangeOfString:@"Label"].location != NSNotFound) continue;
+        BOOL isMaterial = [view isKindOfClass:UIVisualEffectView.class] ||
+            [name rangeOfString:@"MTMaterialView"].location != NSNotFound ||
+            [name isEqualToString:@"_UIBackdropView"] ||
+            [name rangeOfString:@"Background"].location != NSNotFound;
+        if (isMaterial) background = view;
+    }
+    if (!background) return;
+    QApplyGlassSurface(iconView, background, NO);
+    // Keep the mini icons above our glass regardless of native z-order.
+    UIVisualEffectView *glass = objc_getAssociatedObject(background, QBannerGlassKey);
+    if (glass && imageView.superview == glass.superview)
+        [glass.superview bringSubviewToFront:imageView];
+}
+
+// Dock liquid glass. The dock background is an MTMaterialView (402x106 on
+// iOS 17); find it in the dock subtree and replace it with our glass,
+// sharing the popup (alert) glass parameters.
+static void QStyleDock(UIView *dockView) {
+    if (!dockView.window || ![qSettings[@"masterEnabled"] boolValue]) return;
+    UIView *background = nil;
+    NSMutableArray<UIView *> *pending = [NSMutableArray arrayWithArray:dockView.subviews];
+    while (pending.count && !background) {
+        UIView *view = pending.lastObject;
+        [pending removeLastObject];
+        [pending addObjectsFromArray:view.subviews];
+        if (objc_getAssociatedObject(view, QBannerGlassCompatibilityKey)) continue;
+        NSString *name = NSStringFromClass(view.class);
+        BOOL isMaterial = [view isKindOfClass:UIVisualEffectView.class] ||
+            [name rangeOfString:@"MTMaterialView"].location != NSNotFound ||
+            [name isEqualToString:@"_UIBackdropView"];
+        CGFloat area = view.bounds.size.width * view.bounds.size.height;
+        if (isMaterial && area >= 2000) background = view;
+    }
+    if (!background) return;
+    QApplyGlassSurface(dockView, background, NO);
+}
+
+#pragma mark - 系统弹窗玻璃
+
+%group QSystemAlerts
+
+%hook _UIAlertControllerView
+
+- (void)didMoveToWindow {
+    %orig;
+    if (((UIView *)self).window) QStyleSystemAlert((UIView *)self);
+}
+
+- (void)layoutSubviews {
+    %orig;
+    QStyleSystemAlert((UIView *)self);
+}
+
+%end
+
+%hook UIAlertController
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+    QStyleSystemAlert(((UIViewController *)self).view);
+}
+
+%end
+
+%end
+
+%group QSystemContextMenu
+
+%hook _UIContextMenuView
+
+- (void)didMoveToWindow {
+    %orig;
+    if (((UIView *)self).window) {
+        QStyleSystemAlert((UIView *)self);
+    }
+}
+
+- (void)layoutSubviews {
+    %orig;
+    QStyleSystemAlert((UIView *)self);
+}
+
+%end
+
+%hook _UIContextMenuListView
+
+- (void)didMoveToWindow {
+    %orig;
+    if (((UIView *)self).window) QStyleSystemAlert((UIView *)self);
+}
+
+- (void)layoutSubviews {
+    %orig;
+    QStyleSystemAlert((UIView *)self);
+}
+
+%end
+
+
+%end
+
+%group QFolderGlass
+
+%hook SBFolderBackgroundView
+
+- (void)didMoveToWindow {
+    %orig;
+    if (((UIView *)self).window) QStyleFolderBackground((UIView *)self);
+}
+
+- (void)layoutSubviews {
+    %orig;
+    QStyleFolderBackground((UIView *)self);
+}
+
+%end
+
+%hook SBIconView
+
+- (void)didMoveToWindow {
+    %orig;
+    if (((UIView *)self).window) QStyleFolderIcon((UIView *)self);
+}
+
+- (void)layoutSubviews {
+    %orig;
+    QStyleFolderIcon((UIView *)self);
+}
+
+%end
+
+// Backup trigger DISABLED in 2.7.15: suspected std::bad_alloc cause.
+// The BFS traversal in didMoveToWindow may loop on malformed hierarchies.
+// Folder icon glass is temporarily disabled until a safe approach is found.
+// %hook MTMaterialView
+//
+// - (void)didMoveToWindow {
+//     %orig;
+//     UIView *selfView = (UIView *)self;
+//     if (!selfView.window) return;
+//     if (QHasAncestor(selfView, @"SBFolderBackgroundView")) return;
+//     if (!QHasAncestor(selfView, @"SBIconView")) return;
+//     for (UIView *a = selfView.superview; a; a = a.superview) {
+//         if ([NSStringFromClass(a.class) isEqualToString:@"SBIconView"]) {
+//             QApplyGlassSurface(a, selfView, NO);
+//             UIVisualEffectView *glass = objc_getAssociatedObject(selfView, QBannerGlassKey);
+//             if (glass) {
+//                 NSMutableArray<UIView *> *pending = [NSMutableArray arrayWithArray:a.subviews];
+//                 while (pending.count) {
+//                     UIView *view = pending.lastObject;
+//                     [pending removeLastObject];
+//                     [pending addObjectsFromArray:view.subviews];
+//                     NSString *name = NSStringFromClass(view.class);
+//                     if ([name rangeOfString:@"Folder"].location != NSNotFound &&
+//                         ([name rangeOfString:@"Image"].location != NSNotFound ||
+//                          [name rangeOfString:@"Icon"].location != NSNotFound) &&
+//                         view.superview == glass.superview) {
+//                         [glass.superview bringSubviewToFront:view];
+//                         break;
+//                     }
+//                 }
+//             }
+//             break;
+//         }
+//     }
+// }
+//
+// %end
+
+%end
+
+%group QDockGlass
+
+%hook SBDockView
+
+- (void)didMoveToWindow {
+    %orig;
+    if (((UIView *)self).window) QStyleDock((UIView *)self);
+}
+
+- (void)layoutSubviews {
+    %orig;
+    QStyleDock((UIView *)self);
+}
+
+%end
+
+%end
+
+#pragma mark - 控制中心玻璃
+
+%group QControlCenter
+
+%hook CCUIContentModuleBackgroundView
+
+- (void)willMoveToSuperview:(UIView *)newSuperview {
+    UIView *background = (UIView *)self;
+    if (background.superview && newSuperview != background.superview) {
+        UIVisualEffectView *glass = objc_getAssociatedObject(self, QBannerGlassKey);
+        [glass removeFromSuperview];
+        objc_setAssociatedObject(self, QBannerGlassKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        QSetControlCenterNativeMaterialHidden(background, NO);
+        QSetControlCenterContentClipped(background, NO);
+        QSetLockGlassShadowHidden(background, NO);
+        if (glass) background.hidden = NO;
+    }
+    %orig;
+}
+
+- (void)didMoveToSuperview {
+    %orig;
+    if (((UIView *)self).superview)
+        QApplyGlassSurface((UIView *)self, (UIView *)self, NO);
+}
+
+- (void)didMoveToWindow {
+    %orig;
+    if (((UIView *)self).window)
+        QApplyGlassSurface((UIView *)self, (UIView *)self, NO);
+}
+
+- (void)layoutSubviews {
+    %orig;
+    [qActiveControlCenterBackgrounds addObject:(UIView *)self];
+    QApplyGlassSurface((UIView *)self, (UIView *)self, NO);
+}
+
+%end
+
+%hook CCUIContentModuleContentContainerView
+
+- (void)layoutSubviews {
+    %orig;
+    UIView *host = ((UIView *)self).superview;
+    for (UIView *sibling in host.subviews) {
+        if (![sibling isKindOfClass:objc_getClass("CCUIContentModuleBackgroundView")]) continue;
+        if (!QHasAncestor(sibling, @"CCUIContentModuleContainerView")) continue;
+        if (MIN(sibling.bounds.size.width, sibling.bounds.size.height) < 150 &&
+            ((UIView *)self).bounds.size.height <= ((UIView *)self).bounds.size.width * 1.5 &&
+            !QFind((UIView *)self, @"CCUIContinuousSliderView")) continue;
+        QApplyGlassSurface(sibling, sibling, NO);
+        break;
+    }
+}
+
+%end
+
+%hook CCUIContinuousSliderView
+
+- (void)layoutSubviews {
+    %orig;
+    UIView *slider = (UIView *)self;
+    BOOL glassEnabled = [qSettings[@"masterEnabled"] boolValue] &&
+        [qSettings[@"controlCenterGlass"] boolValue] &&
+        QHasAncestor(slider, @"CCUIContentModuleContainerView") &&
+        slider.bounds.size.height > slider.bounds.size.width * 1.5;
+    NSArray *original = objc_getAssociatedObject(self, QCCContentClipKey);
+    if (glassEnabled) {
+        if (!original)
+            objc_setAssociatedObject(self, QCCContentClipKey,
+                @[@(slider.clipsToBounds), @(slider.layer.cornerRadius), slider.layer.cornerCurve ?: kCACornerCurveCircular],
+                OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        slider.layer.cornerRadius = QControlCenterCornerRadius(slider.bounds.size);
+        slider.layer.cornerCurve = kCACornerCurveCircular;
+        slider.clipsToBounds = YES;
+    } else if (original) {
+        slider.clipsToBounds = [original[0] boolValue];
+        slider.layer.cornerRadius = [original[1] doubleValue];
+        slider.layer.cornerCurve = original[2];
+        objc_setAssociatedObject(self, QCCContentClipKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
+%end
+
+%hook MTMaterialView
+
+- (void)willMoveToWindow:(UIWindow *)newWindow {
+    QUpdateControlCenterOverlayBackground((UIView *)self, newWindow);
+    %orig;
+}
+
+- (void)setBounds:(CGRect)bounds {
+    %orig;
+    UIView *view = (UIView *)self;
+    if (view.window)
+        QUpdateControlCenterOverlayBackground((UIView *)self, nil);
+    if (objc_getAssociatedObject(self, QCCPrimaryExpandedGlassKey))
+        QApplyGlassSurface(view, view, NO);
+}
+
+- (void)setHidden:(BOOL)hidden {
+    UIVisualEffectView *glass = objc_getAssociatedObject(self, QBannerGlassKey);
+    if (glass.superview == ((UIView *)self).superview &&
+        QIsControlCenterExpandedMaterial((UIView *)self)) hidden = YES;
+    %orig(hidden);
+}
+
+- (void)willMoveToSuperview:(UIView *)newSuperview {
+    UIView *view = (UIView *)self;
+    if (newSuperview != view.superview) {
+        NSNumber *original = objc_getAssociatedObject(self, QCCOverlayMaterialAlphaKey);
+        if (original) {
+            view.alpha = original.doubleValue;
+            objc_setAssociatedObject(self, QCCOverlayMaterialAlphaKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        UIVisualEffectView *glass = objc_getAssociatedObject(self, QBannerGlassKey);
+        [glass removeFromSuperview];
+        objc_setAssociatedObject(self, QBannerGlassKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(self, QCCExpandedGlassKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(self, QCCPrimaryExpandedGlassKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    %orig;
+}
+
+- (void)didMoveToSuperview {
+    %orig;
+    UIView *view = (UIView *)self;
+    if (QIsControlCenterExpandedMaterial(view))
+        QApplyGlassSurface(view, view, NO);
+}
+
+- (void)didMoveToWindow {
+    %orig;
+    UIView *view = (UIView *)self;
+    QUpdateControlCenterOverlayBackground(view, nil);
+    if (QIsControlCenterExpandedMaterial(view))
+        QApplyGlassSurface(view, view, NO);
+}
+
+- (void)layoutSubviews {
+    %orig;
+    UIView *view = (UIView *)self;
+    QUpdateControlCenterOverlayBackground(view, nil);
+    if (QHasAncestor(view, @"CCUISteppedSliderView") &&
+        QHasAncestor(view, @"CCUIContentModuleContainerView") &&
+        fabs(view.bounds.size.width - view.bounds.size.height) < 2) {
+        NSNumber *original = objc_getAssociatedObject(view, QCCNativeMaterialHiddenKey);
+        BOOL hide = [qSettings[@"masterEnabled"] boolValue] &&
+            [qSettings[@"controlCenterGlass"] boolValue];
+        if (hide && !original)
+            objc_setAssociatedObject(view, QCCNativeMaterialHiddenKey, @(view.hidden), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (hide) view.hidden = YES;
+        else if (original) {
+            view.hidden = original.boolValue;
+            objc_setAssociatedObject(view, QCCNativeMaterialHiddenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+    }
+    if (!QIsControlCenterExpandedMaterial(view) &&
+        !objc_getAssociatedObject(self, QBannerGlassKey)) return;
+    [qActiveControlCenterExpandedMaterials addObject:(UIView *)self];
+    QApplyGlassSurface((UIView *)self, (UIView *)self, NO);
+}
+
+%end
+
+%end
+
 #pragma mark - 锁屏快捷按钮玻璃
 
 %group QQuickActions
@@ -2185,6 +2937,8 @@ static void QScheduleListScaling(UIView *list) {
         qActiveLists = [NSHashTable weakObjectsHashTable];
         qActiveBanners = [NSHashTable weakObjectsHashTable];
         qActiveQuickActionButtons = [NSHashTable weakObjectsHashTable];
+        qActiveControlCenterBackgrounds = [NSHashTable weakObjectsHashTable];
+        qActiveControlCenterExpandedMaterials = [NSHashTable weakObjectsHashTable];
         QLoadSettings();
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
                                         QChanged, CFSTR("com.gushi.quart17/preferenceschanged"),
@@ -2210,6 +2964,13 @@ static void QScheduleListScaling(UIView *list) {
         }
         if (objc_getClass("NCNotificationShortLookViewController")) %init(QNotifications);
         if (objc_getClass("CSQuickActionsButton")) %init(QQuickActions);
+        dlopen("/System/Library/PrivateFrameworks/ControlCenterUI.framework/ControlCenterUI", RTLD_LAZY);
+        if (objc_getClass("CCUIContentModuleBackgroundView")) %init(QControlCenter);
+        if (objc_getClass("_UIAlertControllerView")) %init(QSystemAlerts);
+        if (objc_getClass("_UIContextMenuView") || objc_getClass("_UIContextMenuListView"))
+            %init(QSystemContextMenu);
+        if (objc_getClass("SBFolderBackgroundView") || objc_getClass("SBIconView")) %init(QFolderGlass);
+        if (objc_getClass("SBDockView") || objc_getClass("SBFloatingDockView")) %init(QDockGlass);
         if (objc_getClass("NCToggleControl")) %init(QHeaderButtons);
         if (objc_getClass("PLPlatterView")) %init(QHostPlatter);
         if (objc_getClass("NCNotificationListCell")) %init(QScale);

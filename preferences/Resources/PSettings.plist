@@ -8,7 +8,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>大封面与环绕进度条一起缩放；大封面圆角可单独调整。点击封面展开或收起，展开后可横滑播放器调整进度；点击歌名打开播放 App。</string>
+			<string>大封面与环绕进度条一起缩放；大封面圆角可单独调整。缩小时可上下位移大封面。点击封面展开或收起，展开后可横滑播放器调整进度；点击歌名打开播放 App。</string>
 			<key>label</key>
 			<string>播放器</string>
 		</dict>
@@ -93,6 +93,28 @@
 			<true/>
 			<key>set</key>
 			<string>setPreferenceValue:specifier:</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSStaticTextCell</string>
+			<key>cellClass</key>
+			<string>QWidthSliderCell</string>
+			<key>default</key>
+			<integer>0</integer>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>key</key>
+			<string>largeArtworkOffsetY</string>
+			<key>label</key>
+			<string>大封面上下位移</string>
+			<key>max</key>
+			<integer>200</integer>
+			<key>min</key>
+			<integer>-200</integer>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+			<key>unit</key>
+			<string>pt</string>
 		</dict>
 		<dict>
 			<key>cell</key>

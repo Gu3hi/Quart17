@@ -19,12 +19,27 @@ static id QReadPref(NSString *key, id fallback) {
     NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:QPrefsPath()];
     return settings[key] ?: fallback;
 }
+static void QPublishComponentSettings(NSDictionary *settings) {
+    int token = -1;
+    if (notify_register_check("com.gushi.quart17/components", &token) != NOTIFY_STATUS_OK) return;
+    uint64_t state = 0x51430000ULL;
+    NSArray *keys = @[@"masterEnabled", @"appTabBarGlass", @"appNavigationBarGlass", @"appButtonGlass"];
+    for (NSUInteger i = 0; i < keys.count; i++)
+        if ([settings[keys[i]] ?: @(i == 0) boolValue]) state |= 1ULL << i;
+    notify_set_state(token, state);
+    notify_cancel(token);
+}
 static void QWritePref(NSString *key, id value) {
     if (!key.length || !value) return;
     NSMutableDictionary *settings = [[NSDictionary dictionaryWithContentsOfFile:QPrefsPath()] mutableCopy]
                                      ?: [NSMutableDictionary dictionary];
     settings[key] = value;
     [settings writeToFile:QPrefsPath() atomically:YES];
+    QPublishComponentSettings(settings);
+    CFPreferencesSetValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)value,
+        CFSTR("com.gushi.quart17"), kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+    CFPreferencesSynchronize(CFSTR("com.gushi.quart17"),
+        kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
     if ([key isEqualToString:@"playerCornerRoundness"] ||
         [key isEqualToString:@"largeArtworkScale"] ||
         [key isEqualToString:@"largeArtworkRoundness"]) {
@@ -150,7 +165,8 @@ static void QWritePref(NSString *key, id value) {
     if ([specifier.properties[@"unit"] isEqualToString:@"pt"])
         return [NSString stringWithFormat:@"%.0f pt", round(v)];
     NSString *key = specifier.properties[@"key"];
-    if ([key isEqualToString:@"desktopVeil"] || [key isEqualToString:@"lockVeil"])
+    if ([key isEqualToString:@"desktopVeil"] || [key isEqualToString:@"lockVeil"] ||
+        [key isEqualToString:@"alertVeil"] || [key isEqualToString:@"ccVeil"])
         return [NSString stringWithFormat:@"%.0f%%", round(v)];
     return [NSString stringWithFormat:@"%.0f%%", round(v * 100.0)];
 }
@@ -162,7 +178,11 @@ static void QWritePref(NSString *key, id value) {
     NSString *key = specifier.properties[@"key"];
     if ([key isEqualToString:@"glassBlur"] || [key isEqualToString:@"glassRefraction"] ||
         [key isEqualToString:@"glassHighlight"] ||
-        [key isEqualToString:@"desktopVeil"] || [key isEqualToString:@"lockVeil"]) {
+        [key isEqualToString:@"desktopVeil"] || [key isEqualToString:@"lockVeil"] ||
+        [key isEqualToString:@"alertGlassBlur"] || [key isEqualToString:@"alertGlassRefraction"] ||
+        [key isEqualToString:@"alertGlassHighlight"] || [key isEqualToString:@"alertVeil"] ||
+        [key isEqualToString:@"ccGlassBlur"] || [key isEqualToString:@"ccGlassRefraction"] ||
+        [key isEqualToString:@"ccGlassHighlight"] || [key isEqualToString:@"ccVeil"]) {
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
         if (now - self.qLastLiveWrite >= 0.08) {
             self.qLastLiveWrite = now;
@@ -268,7 +288,8 @@ static void QWritePref(NSString *key, id value) {
             @"progressFromArtwork": @"line.diagonal",
             @"autoContrastText": @"circle.lefthalf.filled",
             @"showNotificationCount": @"number.circle",
-            @"notificationsLink": @"bell.badge", @"playerLink": @"play.rectangle.fill"
+            @"notificationsLink": @"bell.badge", @"playerLink": @"play.rectangle.fill",
+            @"controlCenterGlass": @"rectangle.3.group"
         };
         NSDictionary *english = @{
             @"启用插件": @"Enable Quart17", @"尺寸": @"Size", @"锁屏列表大小": @"Lock Screen list size",
@@ -302,9 +323,30 @@ static void QWritePref(NSString *key, id value) {
             @"致敬 @LaughingQuoll": @"Tribute to @LaughingQuoll",
             @"开源项目": @"Source code",
             @"通知设置": @"Notifications",
+            @"控制中心": @"Control Center",
+            @"应用组件玻璃": @"App Component Glass",
             @"通知样式": @"Notification Style", @"尺寸与圆角": @"Size & Corners",
             @"进度条": @"Progress Bar", @"控制按钮": @"Controls",
-            @"播放器": @"Player", @"功能": @"Features"
+            @"播放器": @"Player", @"功能": @"Features",
+            @"通知玻璃": @"Notification Glass",
+            @"弹窗玻璃": @"Popup Glass", @"弹窗设置": @"Popup Settings",
+            @"控制中心玻璃": @"Control Center Glass",
+            @"去掉背景": @"Remove Background",
+            @"文件夹玻璃": @"Folder Glass", @"文件夹": @"Folders",
+            @"Dock 玻璃": @"Dock Glass",
+            @"模糊强度": @"Blur Intensity",
+            @"边缘折射": @"Edge Refraction",
+            @"高光强度": @"Highlight Intensity",
+            @"底色浓度": @"Base Tint",
+            @"桌面底色浓度": @"Home Screen Tint",
+            @"锁屏底色浓度": @"Lock Screen Tint",
+            @"强制深色模式": @"Force Dark Mode",
+            @"测试横幅": @"Test Banner",
+            @"显示常驻测试横幅": @"Show Persistent Test Banner",
+            @"移除测试横幅": @"Remove Test Banner",
+            @"背景": @"Background",
+            @"Quart 原风格": @"Quart Original", @"液态玻璃": @"Liquid Glass",
+            @"底部": @"Bottom", @"封面圆环": @"Artwork Ring"
         };
         NSDictionary *englishFooters = @{
             @"关闭总开关会停用通知与锁屏播放器样式，并收起以下设置。": @"Turn off to disable both styles and collapse the options below.",
@@ -317,7 +359,12 @@ static void QWritePref(NSString *key, id value) {
             @"外观可选 Quart 原风格或液态玻璃；玻璃参数与通知共用。三种进度样式只能选择一种。点右上角“刷新”不会中断音频。": @"Choose Quart original or Liquid Glass. The player shares the notification glass controls. Choose one progress style; Refresh keeps audio playing.",
             @"大封面与环绕进度条一起缩放；大封面圆角可单独调整。缩小时可上下位移大封面。点击封面展开或收起，展开后可横滑播放器调整进度；点击歌名打开播放 App。": @"Expanded artwork and its progress ring scale together. Adjust expanded artwork corners separately. When shrunk, you can shift the artwork vertically. Tap the cover to expand or collapse it, swipe the player to seek while expanded, or tap the title to open the playing app.",
             @"为每首歌从封面提取颜色。关闭某项后，该项使用固定配色。": @"Pick colors from each song's artwork. Disabled items use fixed colors.",
-            @"致敬 @LaughingQuoll\n永远怀念最好的开发者。": @"In tribute to @LaughingQuoll\nForever remembering the best developer."
+            @"致敬 @LaughingQuoll\n永远怀念最好的开发者。": @"In tribute to @LaughingQuoll\nForever remembering the best developer.",
+            @"控制中心模块使用这里的玻璃参数，与通知玻璃独立调节。": @"Control Center modules use these glass settings, independent from notification glass.",
+            @"系统弹窗、长按菜单、快捷操作按钮与 Dock 使用这里的玻璃参数，与通知玻璃独立调节。": @"System alerts, long-press menus, quick action buttons and the Dock use these glass settings, independent from notification glass.",
+            @"桌面横幅与锁屏通知共用前三个滑块，底色浓度可分别调节。拖动时立即更新常驻测试横幅；锁屏通知固定为深色外观。": @"Banners and Lock Screen notifications share the first three sliders, with base tint adjustable separately. Dragging updates the persistent test banner live; Lock Screen notifications stay dark.",
+            @"横幅会持续显示，直到点击关闭或移除按钮；不会进入通知中心。": @"The banner stays until dismissed or removed, and never enters Notification Center.",
+            @"打开的文件夹背景使用液态玻璃，复用上方玻璃参数和桌面底色浓度。": @"Open folders use Liquid Glass for their background, reusing the glass settings above and the Home Screen tint."
         };
         for (PSSpecifier *specifier in specifiers) {
             NSString *key = specifier.properties[@"key"];
@@ -396,6 +443,23 @@ static void QWritePref(NSString *key, id value) {
 - (void)openPlayerSettings:(id)sender {
     Class controllerClass = NSClassFromString(@"QPlayerListController");
     UIViewController *controller = [[controllerClass alloc] init];
+    [self.navigationController pushViewController:controller animated:YES];
+}
+
+- (void)openAlertSettings:(id)sender {
+    Class controllerClass = NSClassFromString(@"QAlertListController");
+    UIViewController *controller = [[controllerClass alloc] init];
+    [self.navigationController pushViewController:controller animated:YES];
+}
+
+- (void)openControlCenterSettings:(id)sender {
+    Class controllerClass = NSClassFromString(@"QControlCenterListController");
+    UIViewController *controller = [[controllerClass alloc] init];
+    [self.navigationController pushViewController:controller animated:YES];
+}
+
+- (void)openComponentsSettings:(id)sender {
+    UIViewController *controller = [[NSClassFromString(@"QComponentsListController") alloc] init];
     [self.navigationController pushViewController:controller animated:YES];
 }
 
@@ -480,6 +544,114 @@ static void QWritePref(NSString *key, id value) {
 - (void)hideTestNotification:(id)sender {
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
         CFSTR("com.gushi.quart17/hidetestnotification"), NULL, NULL, YES);
+}
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    PSSpecifier *specifier = [self specifierAtIndexPath:indexPath];
+    id cellClass = specifier.properties[@"cellClass"];
+    if ([cellClass isKindOfClass:NSString.class] && [cellClass isEqualToString:@"QWidthSliderCell"])
+        return 88.0;
+    if (cellClass == NSClassFromString(@"QWidthSliderCell")) return 88.0;
+    return [super tableView:tableView heightForRowAtIndexPath:indexPath];
+}
+- (id)readPreferenceValue:(PSSpecifier *)specifier {
+    return QReadPref(specifier.properties[@"key"], specifier.properties[@"default"]);
+}
+- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
+    QWritePref(specifier.properties[@"key"], value);
+}
+@end
+
+@interface QAlertListController : PSListController
+@end
+
+@interface QComponentsListController : PSListController
+@end
+
+@implementation QComponentsListController
+- (NSArray *)specifiers {
+    QPublishComponentSettings([NSDictionary dictionaryWithContentsOfFile:QPrefsPath()]);
+    if (!_specifiers) {
+        _specifiers = [[self loadSpecifiersFromPlistName:@"Components" target:self] mutableCopy];
+        BOOL chinese = [[NSLocale.preferredLanguages.firstObject lowercaseString] hasPrefix:@"zh"];
+        self.title = chinese ? @"应用组件玻璃" : @"App Component Glass";
+        if (!chinese) {
+            NSDictionary *labels = @{@"Tab 栏玻璃": @"Tab bar glass", @"导航栏玻璃": @"Navigation bar glass",
+                @"标准按钮玻璃": @"Standard button glass", @"应用组件玻璃": @"App Component Glass"};
+            for (PSSpecifier *specifier in _specifiers)
+                if (labels[specifier.name]) specifier.name = labels[specifier.name];
+        }
+    }
+    return _specifiers;
+}
+- (id)readPreferenceValue:(PSSpecifier *)specifier {
+    return QReadPref(specifier.properties[@"key"], specifier.properties[@"default"]);
+}
+- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
+    QWritePref(specifier.properties[@"key"], value);
+}
+@end
+
+@implementation QAlertListController
+- (NSArray *)specifiers {
+    if (!_specifiers) {
+        _specifiers = [[self loadSpecifiersFromPlistName:@"Popup" target:self] mutableCopy];
+        BOOL chinese = [[NSLocale.preferredLanguages.firstObject lowercaseString] hasPrefix:@"zh"];
+        self.title = chinese ? @"弹窗设置" : @"Popup Settings";
+        if (!chinese) {
+            NSDictionary *labels = @{@"弹窗玻璃": @"Popup Glass",
+                                      @"模糊强度": @"Blur", @"边缘折射": @"Edge refraction",
+                                      @"高光强度": @"Highlights", @"底色浓度": @"Veil",
+                                      @"强制深色模式": @"Force dark mode",
+                                      @"Dock 玻璃": @"Dock glass",
+                                      @"隐藏桌面长按菜单背景模糊": @"Hide Home Screen menu background blur"};
+            for (PSSpecifier *specifier in _specifiers) {
+                NSString *label = labels[specifier.name];
+                if (label) specifier.name = label;
+            }
+        }
+    }
+    return _specifiers;
+}
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    PSSpecifier *specifier = [self specifierAtIndexPath:indexPath];
+    id cellClass = specifier.properties[@"cellClass"];
+    if ([cellClass isKindOfClass:NSString.class] && [cellClass isEqualToString:@"QWidthSliderCell"])
+        return 88.0;
+    if (cellClass == NSClassFromString(@"QWidthSliderCell")) return 88.0;
+    return [super tableView:tableView heightForRowAtIndexPath:indexPath];
+}
+- (id)readPreferenceValue:(PSSpecifier *)specifier {
+    return QReadPref(specifier.properties[@"key"], specifier.properties[@"default"]);
+}
+- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
+    QWritePref(specifier.properties[@"key"], value);
+}
+@end
+
+@interface QControlCenterListController : PSListController
+@end
+
+@implementation QControlCenterListController
+- (NSArray *)specifiers {
+    if (!_specifiers) {
+        _specifiers = [[self loadSpecifiersFromPlistName:@"CCSettings" target:self] mutableCopy];
+        BOOL chinese = [[NSLocale.preferredLanguages.firstObject lowercaseString] hasPrefix:@"zh"];
+        self.title = chinese ? @"控制中心" : @"Control Center";
+        if (!chinese) {
+            NSDictionary *labels = @{@"控制中心玻璃": @"Control Center Glass",
+                                      @"模糊强度": @"Blur", @"边缘折射": @"Edge refraction",
+                                      @"高光强度": @"Highlights", @"底色浓度": @"Veil"};
+            for (PSSpecifier *specifier in _specifiers) {
+                NSString *label = labels[specifier.name];
+                if (label) specifier.name = label;
+                NSString *footer = specifier.properties[@"footerText"];
+                if (footer)
+                    [specifier setProperty:@"Control Center modules use these glass controls, independent of notification glass."
+                                  forKey:@"footerText"];
+            }
+        }
+    }
+    return _specifiers;
 }
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
     PSSpecifier *specifier = [self specifierAtIndexPath:indexPath];
