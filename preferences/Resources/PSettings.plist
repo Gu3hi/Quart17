@@ -28,27 +28,25 @@
 		</dict>
 		<dict>
 			<key>cell</key>
-			<string>PSSegmentCell</string>
+			<string>PSStaticTextCell</string>
+			<key>cellClass</key>
+			<string>QWidthSliderCell</string>
 			<key>default</key>
-			<integer>0</integer>
+			<real>1.0</real>
 			<key>get</key>
 			<string>readPreferenceValue:</string>
 			<key>key</key>
-			<string>playerAppearance</string>
+			<string>playerCornerRoundness</string>
 			<key>label</key>
-			<string>播放器外观</string>
+			<string>播放器圆角</string>
+			<key>max</key>
+			<real>1.0</real>
+			<key>min</key>
+			<real>0.0</real>
+			<key>percent</key>
+			<true/>
 			<key>set</key>
 			<string>setPreferenceValue:specifier:</string>
-			<key>validTitles</key>
-			<array>
-				<string>Quart 原风格</string>
-				<string>液态玻璃</string>
-			</array>
-			<key>validValues</key>
-			<array>
-				<integer>0</integer>
-				<integer>1</integer>
-			</array>
 		</dict>
 		<dict>
 			<key>cell</key>

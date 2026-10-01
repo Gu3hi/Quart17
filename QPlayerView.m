@@ -14,8 +14,6 @@
 #import <math.h>
 
 
-extern void QUpdateGlassRefraction(CALayer *backdrop, CGSize size, CGFloat radius,
-                                   CGFloat magnitude, UIVisualEffectView *glass);
 
 typedef void (^QInfoCompletion)(CFDictionaryRef);
 typedef void (^QPlayingCompletion)(Boolean);
@@ -247,10 +245,6 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 @property (nonatomic, strong) UILabel *remainingLabel;
 @property (nonatomic, strong) UISlider *progress;
 @property (nonatomic, strong) UIView *backgroundProgress;
-@property (nonatomic, strong) UIVisualEffectView *glassSurface;
-@property (nonatomic, strong) CALayer *glassBackdrop;
-@property (nonatomic, strong) id glassBlurFilter;
-@property (nonatomic, strong) CAGradientLayer *glassSheen;
 @property (nonatomic, strong) UIView *backgroundSeekArea;
 @property (nonatomic, strong) QOutlineButton *previousButton;
 @property (nonatomic, strong) QOutlineButton *playButton;
@@ -282,7 +276,6 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 - (CGFloat)sizeFactor;
 - (CGFloat)artworkSide;
 - (void)updateScaledFonts;
-- (void)updateGlassSurface;
 @end
 
 @implementation QPlayerView
@@ -526,7 +519,6 @@ static const CGFloat kQPlayerArtworkDesign = 60.0;
     self.routeView.hidden = [settings[@"hideRoute"] boolValue];
     [self updateControlImages];
     [self updateAccent];
-    [self updateGlassSurface];
     [self updateScaledFonts];   // 字号只在这里更新（布局之外），避免布局递归
     [self setNeedsLayout];
 }
@@ -564,11 +556,8 @@ static UIColor *QAccentFromImage(UIImage *image) {
     self.artworkAccent = accent;
     CGFloat r = 0, g = 0, b = 0, a = 0;
     [accent getRed:&r green:&g blue:&b alpha:&a];
-    BOOL dark = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark ||
-                [self.settings[@"playerAppearance"] integerValue] == 1;
-    BOOL glassPlayer = self.expandedArtwork &&
-        [self.settings[@"playerAppearance"] integerValue] == 1;
-    CGFloat textMix = glassPlayer ? 0.76 : 0.48;
+    BOOL dark = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
+    CGFloat textMix = 0.48;
     UIColor *textAccent = dark ? [UIColor colorWithRed:MIN(1, r * (1 - textMix) + textMix)
                                                   green:MIN(1, g * (1 - textMix) + textMix)
                                                    blue:MIN(1, b * (1 - textMix) + textMix) alpha:1] : accent;
@@ -583,13 +572,11 @@ static UIColor *QAccentFromImage(UIImage *image) {
         ? (dark ? [UIColor colorWithRed:r * 0.55 + 0.04 green:g * 0.55 + 0.04 blue:b * 0.55 + 0.04 alpha:0.97]
                 : [UIColor colorWithRed:r * 0.38 + 0.60 green:g * 0.38 + 0.60 blue:b * 0.38 + 0.60 alpha:0.97])
         : [UIColor colorWithWhite:dark ? 0.14 : 0.93 alpha:0.96];
-    if ([self.settings[@"playerAppearance"] integerValue] == 1)
-        self.backgroundColor = UIColor.clearColor;
     self.titleLabel.textColor = [self.settings[@"titleFromArtwork"] boolValue]
         ? textAccent : [UIColor colorWithWhite:dark ? 0.96 : 0.15 alpha:1];
     self.artistLabel.textColor = [self.settings[@"artistFromArtwork"] boolValue]
-        ? [textAccent colorWithAlphaComponent:glassPlayer ? 0.94 : 0.78]
-        : [UIColor colorWithWhite:glassPlayer ? 0.94 : (dark ? 0.76 : 0.36) alpha:1];
+        ? [textAccent colorWithAlphaComponent:0.78]
+        : [UIColor colorWithWhite:dark ? 0.76 : 0.36 alpha:1];
     self.progress.minimumTrackTintColor = progressColor;
     self.progress.maximumTrackTintColor = [UIColor colorWithWhite:dark ? 0.85 : 0.62 alpha:dark ? 0.3 : 0.6];
     self.backgroundProgress.backgroundColor = [progressColor colorWithAlphaComponent:dark ? 0.36 : 0.18];
@@ -601,76 +588,6 @@ static UIColor *QAccentFromImage(UIImage *image) {
     self.nextButton.tintColor = textAccent;
 }
 
-- (void)updateGlassSurface {
-    BOOL enabled = [self.settings[@"playerAppearance"] integerValue] == 1;
-    if (!enabled) {
-        [self.glassSurface removeFromSuperview];
-        self.glassSurface = nil;
-        self.glassBackdrop = nil;
-        self.glassBlurFilter = nil;
-        self.glassSheen = nil;
-        return;
-    }
-    if (!self.glassSurface) {
-        UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:nil];
-        glass.userInteractionEnabled = NO;
-        glass.clipsToBounds = YES;
-        glass.layer.cornerCurve = kCACornerCurveCircular;
-        Class backdropClass = NSClassFromString(@"CABackdropLayer");
-        Class filterClass = NSClassFromString(@"CAFilter");
-        SEL filterSelector = NSSelectorFromString(@"filterWithName:");
-        if (backdropClass && filterClass && [filterClass respondsToSelector:filterSelector]) {
-            @try {
-                CALayer *backdrop = ((id (*)(id, SEL))objc_msgSend)(backdropClass, @selector(layer));
-                id blur = ((id (*)(id, SEL, id))objc_msgSend)(filterClass, filterSelector, @"gaussianBlur");
-                if (backdrop && blur) {
-                    [backdrop setValue:@[blur] forKey:@"filters"];
-                    [backdrop setValue:@1 forKey:@"scale"];
-                    backdrop.rasterizationScale = UIScreen.mainScreen.scale;
-                    [glass.layer insertSublayer:backdrop atIndex:0];
-                    self.glassBackdrop = backdrop;
-                    self.glassBlurFilter = blur;
-                }
-            } @catch (NSException *exception) {}
-        }
-        CAGradientLayer *sheen = [CAGradientLayer layer];
-        sheen.locations = @[@0, @0.48, @1];
-        [glass.contentView.layer addSublayer:sheen];
-        self.glassSheen = sheen;
-        [self insertSubview:glass atIndex:0];
-        self.glassSurface = glass;
-    }
-    BOOL dark = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark ||
-                [self.settings[@"playerAppearance"] integerValue] == 1;
-    CGFloat blur = self.settings[@"glassBlur"] ? [self.settings[@"glassBlur"] doubleValue] : 8;
-    CGFloat refraction = self.settings[@"glassRefraction"] ? [self.settings[@"glassRefraction"] doubleValue] : 12;
-    CGFloat highlight = self.settings[@"glassHighlight"] ? [self.settings[@"glassHighlight"] doubleValue] : 0.5;
-    blur = isfinite(blur) ? MAX(0, MIN(18, blur)) : 8;
-    refraction = isfinite(refraction) ? MAX(0, MIN(24, refraction)) : 12;
-    highlight = isfinite(highlight) ? MAX(0, MIN(1, highlight)) : 0.5;
-    if (self.glassBackdrop) {
-        [self.glassBlurFilter setValue:@(blur) forKey:@"inputRadius"];
-    } else {
-        UIBlurEffectStyle style = dark ? UIBlurEffectStyleSystemUltraThinMaterialDark : UIBlurEffectStyleSystemUltraThinMaterialLight;
-        self.glassSurface.effect = blur < 0.5 ? nil : [UIBlurEffect effectWithStyle:style];
-    }
-    self.glassSurface.overrideUserInterfaceStyle = dark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
-    self.glassSurface.frame = self.bounds;
-    self.glassBackdrop.frame = self.glassSurface.bounds;
-    self.glassSurface.layer.cornerRadius = self.layer.cornerRadius;
-    QUpdateGlassRefraction(self.glassBackdrop, self.bounds.size, self.layer.cornerRadius,
-                           refraction, self.glassSurface);
-    self.glassSurface.layer.borderWidth = 0.75;
-    self.glassSurface.layer.borderColor = (dark ? [UIColor colorWithWhite:1 alpha:0.26] :
-                                         [UIColor colorWithWhite:0 alpha:0.16]).CGColor;
-    self.glassSheen.frame = self.glassSurface.bounds;
-    self.glassSheen.colors = dark ? @[(id)[UIColor colorWithWhite:1 alpha:0.26 * highlight].CGColor,
-                                      (id)[UIColor colorWithWhite:1 alpha:0.04 * highlight].CGColor,
-                                      (id)[UIColor colorWithWhite:0 alpha:0.13].CGColor]
-                                  : @[(id)[UIColor colorWithWhite:1 alpha:0.52 * highlight].CGColor,
-                                      (id)[UIColor colorWithWhite:1 alpha:0.05 * highlight].CGColor,
-                                      (id)[UIColor colorWithWhite:0 alpha:0.08].CGColor];
-}
 
 static NSString *QTime(NSTimeInterval value) {
     NSInteger seconds = MAX(0, (NSInteger)round(value));
@@ -1099,7 +1016,6 @@ static CGFloat QArtworkSeekFraction(UIView *area, CGPoint point) {
     roundness = isfinite(roundness) ? MIN(1, MAX(0, roundness)) : 1;
     self.layer.cornerRadius = h * roundness / 2;
     self.layer.cornerCurve = kCACornerCurveCircular;
-    [self updateGlassSurface];
     self.backgroundProgress.layer.cornerCurve = kCACornerCurveCircular;
     self.backgroundProgress.layer.allowsEdgeAntialiasing = YES;
     [self updateProgressFill];
