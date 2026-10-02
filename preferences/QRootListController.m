@@ -11,6 +11,107 @@
 #define QJbroot(path) [@"/var/jb" stringByAppendingString:(path)]
 #endif
 #import <notify.h>
+#import <objc/runtime.h>
+
+#pragma mark - 设计主题（DESIGN.md）
+
+// 深色：画布 #07080A / 卡片 #121419 / 强调 #FF646E / 分隔线白 12%
+// 浅色：画布 #F6F7F9 / 卡片白 / 强调 #C72940 / 分隔线黑 10%
+@interface QTheme : NSObject
++ (UIColor *)canvasColor;
++ (UIColor *)surfaceColor;
++ (UIColor *)accentColor;
++ (UIColor *)hairlineColor;
++ (UIColor *)sliderSurfaceColor;
+@end
+
+@implementation QTheme
++ (UIColor *)canvasColor {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+        if (traits.userInterfaceStyle == UIUserInterfaceStyleLight)
+            return [UIColor colorWithRed:0.965 green:0.969 blue:0.976 alpha:1.0];
+        return [UIColor colorWithRed:0.027 green:0.031 blue:0.039 alpha:1.0];
+    }];
+}
++ (UIColor *)surfaceColor {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+        if (traits.userInterfaceStyle == UIUserInterfaceStyleLight)
+            return UIColor.whiteColor;
+        return [UIColor colorWithRed:0.071 green:0.078 blue:0.098 alpha:1.0];
+    }];
+}
++ (UIColor *)accentColor {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+        if (traits.userInterfaceStyle == UIUserInterfaceStyleLight)
+            return [UIColor colorWithRed:0.780 green:0.161 blue:0.251 alpha:1.0];
+        return [UIColor colorWithRed:1.0 green:0.392 blue:0.431 alpha:1.0];
+    }];
+}
++ (UIColor *)hairlineColor {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+        if (traits.userInterfaceStyle == UIUserInterfaceStyleLight)
+            return [UIColor colorWithWhite:0.0 alpha:0.10];
+        return [UIColor colorWithWhite:1.0 alpha:0.12];
+    }];
+}
++ (UIColor *)sliderSurfaceColor {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+        return traits.userInterfaceStyle == UIUserInterfaceStyleLight
+            ? [UIColor colorWithRed:0.94 green:0.95 blue:0.96 alpha:1.0]
+            : [UIColor colorWithRed:0.071 green:0.078 blue:0.098 alpha:1.0];
+    }];
+}
+@end
+
+// 主题基类：统一表格底色、分隔线、开关强调色；明暗切换时重刷
+@interface QThemedListController : PSListController
+- (void)qApplyTheme;
+@end
+
+@implementation QThemedListController
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    [self qApplyTheme];
+}
+- (void)qApplyTheme {
+    self.view.tintColor = QTheme.accentColor;
+    self.table.backgroundColor = QTheme.canvasColor;
+    self.table.separatorColor = QTheme.hairlineColor;
+}
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    if (self.traitCollection.userInterfaceStyle != previousTraitCollection.userInterfaceStyle) {
+        [self qApplyTheme];
+        [self.table reloadData];
+    }
+}
+- (void)tableView:(UITableView *)tableView
+  willDisplayCell:(UITableViewCell *)cell
+forRowAtIndexPath:(NSIndexPath *)indexPath {
+    if ([PSListController instancesRespondToSelector:_cmd])
+        [super tableView:tableView willDisplayCell:cell forRowAtIndexPath:indexPath];
+    if (![cell isKindOfClass:NSClassFromString(@"QWidthSliderCell")]) {
+        cell.backgroundColor = QTheme.surfaceColor;
+        cell.textLabel.textColor = UIColor.labelColor;
+        cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
+    }
+    PSSpecifier *specifier = [self specifierAtIndexPath:indexPath];
+    if ([specifier.properties[@"qNavigation"] boolValue]) {
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.textLabel.textAlignment = NSTextAlignmentLeft;
+        UIImage *icon = specifier.properties[@"iconImage"];
+        if ([icon isKindOfClass:UIImage.class]) {
+            cell.imageView.hidden = NO;
+            cell.imageView.image = [icon imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+            cell.imageView.tintColor = QTheme.accentColor;
+            [cell setNeedsLayout];
+        }
+    }
+    cell.tintColor = QTheme.accentColor;
+    UISwitch *toggle = [cell.accessoryView isKindOfClass:UISwitch.class] ? (UISwitch *)cell.accessoryView : nil;
+    toggle.onTintColor = QTheme.accentColor;
+}
+@end
 
 static NSString *QPrefsPath(void) {
     return @"/var/mobile/Library/Preferences/com.gushi.quart17.plist";
@@ -101,11 +202,13 @@ static void QWritePref(NSString *key, id value) {
         [self.contentView addSubview:_qValueLabel];
 
         _qCardView = [UIView new];
-        _qCardView.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
+        _qCardView.backgroundColor = QTheme.sliderSurfaceColor;
         _qCardView.layer.cornerRadius = 16.0;
+        _qCardView.layer.borderWidth = 1.0 / UIScreen.mainScreen.scale;
+        _qCardView.layer.borderColor = [QTheme.hairlineColor resolvedColorWithTraitCollection:self.traitCollection].CGColor;
         [self.contentView addSubview:_qCardView];
 
-        UIColor *accent = [UIColor colorWithRed:0.88 green:0.48 blue:0.51 alpha:1.0];
+        UIColor *accent = QTheme.accentColor;
         _qMinusButton = [UIButton buttonWithType:UIButtonTypeSystem];
         [_qMinusButton setImage:[UIImage systemImageNamed:@"minus.circle"] forState:UIControlStateNormal];
         [_qMinusButton setPreferredSymbolConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:22.0 weight:UIImageSymbolWeightRegular] forImageInState:UIControlStateNormal];
@@ -227,12 +330,79 @@ static void QWritePref(NSString *key, id value) {
     self.qSlider.frame = CGRectMake(62.0, 16.0, cardWidth - 124.0, 32.0);
 }
 
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    self.qCardView.layer.borderColor = [QTheme.hairlineColor resolvedColorWithTraitCollection:self.traitCollection].CGColor;
+}
+
 @end
 
 #pragma mark - 列表控制器
 
-@interface QRootListController : PSListController
+@interface QHeroView : UIView
+@property (nonatomic, strong) UIView *panel;
+@property (nonatomic, strong) UIImageView *symbol;
+@property (nonatomic, strong) UILabel *eyebrow;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UILabel *subtitle;
+@end
+
+@implementation QHeroView
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.backgroundColor = UIColor.clearColor;
+        _panel = [UIView new];
+        _panel.backgroundColor = QTheme.surfaceColor;
+        _panel.layer.cornerRadius = 22;
+        _panel.layer.borderWidth = 1.0 / UIScreen.mainScreen.scale;
+        _panel.layer.borderColor = [QTheme.hairlineColor resolvedColorWithTraitCollection:self.traitCollection].CGColor;
+        [self addSubview:_panel];
+
+        NSString *iconPath = [[NSBundle bundleForClass:self.class] pathForResource:@"icon@3x" ofType:@"png"];
+        _symbol = [[UIImageView alloc] initWithImage:[UIImage imageWithContentsOfFile:iconPath]];
+        _symbol.contentMode = UIViewContentModeScaleAspectFit;
+        [_panel addSubview:_symbol];
+
+        _eyebrow = [UILabel new];
+        _eyebrow.text = @"QUART17  /  iOS 17";
+        _eyebrow.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightMedium];
+        _eyebrow.textColor = QTheme.accentColor;
+        [_panel addSubview:_eyebrow];
+
+        _titleLabel = [UILabel new];
+        _titleLabel.text = @"Quart17";
+        _titleLabel.font = [UIFont systemFontOfSize:29 weight:UIFontWeightSemibold];
+        _titleLabel.textColor = UIColor.labelColor;
+        [_panel addSubview:_titleLabel];
+
+        _subtitle = [UILabel new];
+        _subtitle.text = [[[NSLocale preferredLanguages].firstObject lowercaseString] hasPrefix:@"zh"]
+            ? @"通知排版、播放器交互与下拉清理" : @"Notifications, player and swipe to clear";
+        _subtitle.font = [UIFont systemFontOfSize:13];
+        _subtitle.textColor = UIColor.secondaryLabelColor;
+        _subtitle.numberOfLines = 2;
+        [_panel addSubview:_subtitle];
+    }
+    return self;
+}
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    self.panel.frame = CGRectMake(16, 12, MAX(0, self.bounds.size.width - 32), 132);
+    self.symbol.frame = CGRectMake(20, 20, 52, 52);
+    CGFloat textWidth = MAX(0, self.panel.bounds.size.width - 104);
+    self.eyebrow.frame = CGRectMake(88, 20, textWidth, 17);
+    self.titleLabel.frame = CGRectMake(88, 39, textWidth, 36);
+    self.subtitle.frame = CGRectMake(20, 89, MAX(0, self.panel.bounds.size.width - 40), 30);
+}
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    self.panel.layer.borderColor = [QTheme.hairlineColor resolvedColorWithTraitCollection:self.traitCollection].CGColor;
+}
+@end
+
+@interface QRootListController : QThemedListController
 @property (nonatomic, strong) NSArray<PSSpecifier *> *allQuartSpecifiers;
+@property (nonatomic, strong) QHeroView *quartHeader;
 @end
 
 @implementation QRootListController
@@ -241,9 +411,12 @@ static void QWritePref(NSString *key, id value) {
 }
 
 - (NSString *)qPlistName {
-    NSString *detail = self.specifier.properties[@"detail"];
-    if ([detail isEqualToString:@"QNotifications"] || [detail isEqualToString:@"QPlayer"]) {
-        return detail;
+    id detail = self.specifier.properties[@"detail"];
+    NSString *detailName = nil;
+    if ([detail isKindOfClass:NSString.class]) detailName = detail;
+    else if (detail && class_isMetaClass(object_getClass(detail))) detailName = NSStringFromClass((Class)detail);
+    if ([detailName isEqualToString:@"QNotifications"] || [detailName isEqualToString:@"QPlayer"]) {
+        return detailName;
     }
     return @"Root";
 }
@@ -257,6 +430,18 @@ static void QWritePref(NSString *key, id value) {
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
         initWithTitle:[self localized:@"刷新" english:@"Refresh"]
         style:UIBarButtonItemStylePlain target:self action:@selector(respring:)];
+    if ([[self qPlistName] isEqualToString:@"Root"]) {
+        self.quartHeader = [[QHeroView alloc] initWithFrame:CGRectMake(0, 0, self.table.bounds.size.width, 160)];
+        self.table.tableHeaderView = self.quartHeader;
+    }
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    if (self.quartHeader && fabs(self.quartHeader.bounds.size.width - self.table.bounds.size.width) > 1) {
+        self.quartHeader.frame = CGRectMake(0, 0, self.table.bounds.size.width, 160);
+        self.table.tableHeaderView = self.quartHeader;
+    }
 }
 
 - (void)respring:(id)sender {
@@ -300,6 +485,13 @@ static void QWritePref(NSString *key, id value) {
             @"progressFromArtwork": @"line.diagonal",
             @"showNotificationCount": @"number.circle",
             @"notificationsLink": @"bell.badge", @"playerLink": @"play.rectangle.fill"
+        };
+        NSDictionary *namedSymbols = @{
+            @"通知排版与缩放": @"bell.badge",
+            @"播放器布局与操作": @"play.rectangle.fill",
+            @"作者 @Put_Story": @"person.crop.circle",
+            @"致敬 @LaughingQuoll": @"heart",
+            @"开源项目": @"chevron.left.forwardslash.chevron.right"
         };
          NSDictionary *english = @{
              @"通知与播放器": @"Notifications & Player",
@@ -351,10 +543,14 @@ static void QWritePref(NSString *key, id value) {
             @"致敬 @LaughingQuoll\n永远怀念最好的开发者。": @"In tribute to @LaughingQuoll\nForever remembering the best developer.",
         };
         for (PSSpecifier *specifier in specifiers) {
+            NSString *originalName = specifier.name;
             NSString *key = specifier.properties[@"key"];
-            NSString *symbol = key ? symbols[key] : nil;
+            NSString *symbol = key ? symbols[key] : namedSymbols[originalName];
             UIImage *icon = symbol ? [UIImage systemImageNamed:symbol] : nil;
             if (icon) [specifier setProperty:icon forKey:@"iconImage"];
+            if ([originalName isEqualToString:@"通知排版与缩放"] ||
+                [originalName isEqualToString:@"播放器布局与操作"])
+                [specifier setProperty:@YES forKey:@"qNavigation"];
             if (!isChinese) {
                 if ([key isEqualToString:@"progressStyle"]) {
                     [specifier setProperty:@[@"Background", @"Bottom", @"Artwork ring"] forKey:@"validTitles"];
@@ -371,6 +567,11 @@ static void QWritePref(NSString *key, id value) {
     if (!self.allQuartSpecifiers) {
         self.allQuartSpecifiers = [self loadSpecifiersFromPlistName:[self qPlistName] target:self];
         [QRootListController qApplyIconsAndTranslations:self.allQuartSpecifiers isChinese:self.isChinese];
+        NSString *version = [[NSBundle bundleForClass:self.class] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+        for (PSSpecifier *specifier in self.allQuartSpecifiers)
+            if ([specifier.properties[@"qVersionFooter"] boolValue])
+                [specifier setProperty:[NSString stringWithFormat:@"Quart17 %@ · iOS 17", version ?: @"—"]
+                             forKey:@"footerText"];
     }
     if (!_specifiers) {
         // Sub-pages (QNotifications, QPlayer) show all items; only Root does master-switch filtering
@@ -378,10 +579,20 @@ static void QWritePref(NSString *key, id value) {
         if ([plist isEqualToString:@"QNotifications"] || [plist isEqualToString:@"QPlayer"]) {
             _specifiers = [self.allQuartSpecifiers mutableCopy];
         } else {
-            BOOL active = [[self readPreferenceValue:self.allQuartSpecifiers[1]] boolValue];
-            NSArray *visible = active ? self.allQuartSpecifiers :
-                [self.allQuartSpecifiers subarrayWithRange:NSMakeRange(0, MIN(2, self.allQuartSpecifiers.count))];
-            _specifiers = [visible mutableCopy];
+            BOOL active = self.allQuartSpecifiers.count > 1 &&
+                [[self readPreferenceValue:self.allQuartSpecifiers[1]] boolValue];
+            if (active) {
+                _specifiers = [self.allQuartSpecifiers mutableCopy];
+            } else {
+                NSMutableArray *visible = [[self.allQuartSpecifiers
+                    subarrayWithRange:NSMakeRange(0, MIN(2, self.allQuartSpecifiers.count))] mutableCopy];
+                BOOL showFooter = NO;
+                for (PSSpecifier *specifier in self.allQuartSpecifiers) {
+                    if ([specifier.properties[@"qAlwaysVisible"] boolValue]) showFooter = YES;
+                    if (showFooter) [visible addObject:specifier];
+                }
+                _specifiers = visible;
+            }
         }
     }
     return _specifiers;
@@ -468,7 +679,7 @@ static void QWritePref(NSString *key, id value) {
 
 
 
-@interface QNotificationsListController : PSListController
+@interface QNotificationsListController : QThemedListController
 @end
 
 @implementation QNotificationsListController
@@ -509,7 +720,7 @@ static void QWritePref(NSString *key, id value) {
 }
 @end
 
-@interface QPlayerListController : PSListController
+@interface QPlayerListController : QThemedListController
 @end
 
 @implementation QPlayerListController

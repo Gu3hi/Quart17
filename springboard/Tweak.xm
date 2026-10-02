@@ -302,7 +302,7 @@ static NSArray<UIView *> *QStackSiblings(UIView *root) {
     if (CGRectIsNull(rootFrame) || CGRectIsEmpty(rootFrame)) return siblings;
     CGFloat rootArea = rootFrame.size.width * rootFrame.size.height;
     if (rootArea <= 0) return siblings;
-    for (UIView *other in qActiveNotifications) {
+    for (UIView *other in qActiveNotifications.allObjects) {
         if (other == root || !other.window) continue;
         BOOL sameContainer = NO;
         for (UIView *a = other; a && ![a isKindOfClass:UIWindow.class]; a = a.superview) {

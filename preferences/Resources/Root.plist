@@ -93,6 +93,10 @@
 			<string>Quart17 · iOS 17 RootHide</string>
 			<key>label</key>
 			<string>关于</string>
+			<key>qAlwaysVisible</key>
+			<true/>
+			<key>qVersionFooter</key>
+			<true/>
 		</dict>
 		<dict>
 			<key>action</key>
