@@ -37,7 +37,7 @@ Quart17 brings a brand-new lock screen music player and notification experience 
 
 ## 安装要求 / Requirements
 
-- iOS 17.0 – 17.3.1
+- iOS 16 – iOS 17（已测试 / tested）
 - 越狱环境：Dopamine 2.x / RootHide（主要测试环境为 Relaxin 越狱 + RootHide）
 - Jailbreak: Dopamine 2.x / RootHide (primarily tested on Relaxin jailbreak + RootHide)
 - 架构：arm64 / arm64e
