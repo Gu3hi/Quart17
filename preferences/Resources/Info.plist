@@ -3,7 +3,7 @@
 <plist version="1.0"><dict>
 <key>CFBundleIdentifier</key><string>com.gushi.quart17prefs</string>
 <key>CFBundleName</key><string>Quart17</string>
-<key>CFBundleShortVersionString</key><string>2.7.77</string>
+<key>CFBundleShortVersionString</key><string>2.7.96</string>
 <key>CFBundleExecutable</key><string>Quart17Prefs</string>
 <key>CFBundlePackageType</key><string>BNDL</string>
 <key>NSPrincipalClass</key><string>QRootListController</string>

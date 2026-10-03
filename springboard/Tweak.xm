@@ -23,6 +23,15 @@ static NSHashTable<UIView *> *qActivePlatters;
 static NSHashTable<UIView *> *qActiveNotifications;
 static NSHashTable<UIView *> *qActiveLists;
 static NSHashTable<UIView *> *qActiveBanners;
+static NSHashTable<UIView *> *qLockClockViews;
+static void *QLockClockLabelKey = &QLockClockLabelKey;
+static void *QLockClockOriginalHiddenKey = &QLockClockOriginalHiddenKey;
+static void *QLockClockOriginalFrameKey = &QLockClockOriginalFrameKey;
+static void *QLockClockOriginalTransformKey = &QLockClockOriginalTransformKey;
+static void *QLockClockTopContentKey = &QLockClockTopContentKey;
+static void *QLockClockNormalDateKey = &QLockClockNormalDateKey;
+static void *QLockClockNormalDateDayKey = &QLockClockNormalDateDayKey;
+static BOOL qStylingLockClock;
 static void *QOriginalStyleKey = &QOriginalStyleKey;
 static void *QOwnLayerTransformKey = &QOwnLayerTransformKey;
 static void *QOriginalLayerTransformKey = &QOriginalLayerTransformKey;
@@ -63,6 +72,8 @@ static BOOL QApplyListScaling(UIView *list);
 static void QScheduleListScaling(UIView *list);
 static void QClearOwnLayerTransform(UIView *list);
 static void QApplyBannerScaling(UIView *banner);
+static void QStyleLockClock(UIView *dateView);
+static void QRestyleLockClockForWidget(UIView *widget);
 
 @interface NCNotificationShortLookViewController : UIViewController
 - (UIView *)viewForPreview;
@@ -71,10 +82,24 @@ static void QApplyBannerScaling(UIView *banner);
 @interface CSQuickActionsButton : UIView
 @end
 
+@interface SBFLockScreenDateView : UIView
+@end
+
+@interface CSProminentEmptyElementView : UIView
+@end
+
+@interface CSProminentSubtitleDateView : UIView
+@end
+
+@interface _UIAnimatingLabel : UILabel
+@end
+
 
 static void QLoadSettings(void) {
     NSDictionary *saved = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.gushi.quart17.plist"];
     qSettings = [@{ @"masterEnabled": @YES, @"enabled": @YES,
+                    @"smallLockClock": @NO,
+                    @"smallLockClockFontSize": @23,
                     @"playerEnabled": @YES, @"disableListScaling": @NO,
                      @"scaleBanners": @NO,
                     @"showNotificationCount": @YES,
@@ -107,6 +132,21 @@ static void QLoadSettings(void) {
             ((uint64_t)llround(scale * 10000) << 32) |
             0x51700000ULL | (uint64_t)llround(corner * 10000));
     }
+    int offsetToken = -1;
+    if (notify_register_check("com.gushi.quart17/artworkoffset", &offsetToken) == NOTIFY_STATUS_OK) {
+        double offset = [qSettings[@"largeArtworkOffsetY"] doubleValue];
+        offset = isfinite(offset) ? MAX(-200, MIN(200, offset)) : 0;
+        notify_set_state(offsetToken, (uint64_t)llround((offset + 200) * 100) + 1);
+        notify_cancel(offsetToken);
+    }
+    int flagsToken = -1;
+    if (notify_register_check("com.gushi.quart17/artworkflags", &flagsToken) == NOTIFY_STATUS_OK) {
+        notify_set_state(flagsToken, 0x51710000ULL |
+            ([qSettings[@"masterEnabled"] boolValue] ? 1ULL : 0) |
+            ([qSettings[@"playerEnabled"] boolValue] ? 2ULL : 0) |
+            ([qSettings[@"showProgress"] boolValue] ? 4ULL : 0));
+        notify_cancel(flagsToken);
+    }
 }
 
 static void QChanged(CFNotificationCenterRef center, void *observer, CFStringRef name,
@@ -138,6 +178,7 @@ static void QChanged(CFNotificationCenterRef center, void *observer, CFStringRef
         for (UIView *notification in qActiveNotifications.allObjects) QStyle(notification);
         for (UIView *list in qActiveLists.allObjects) QScheduleListScaling(list);
         for (UIView *banner in qActiveBanners.allObjects) QApplyBannerScaling(banner);
+        for (UIView *dateView in qLockClockViews.allObjects) QStyleLockClock(dateView);
     });
 }
 
@@ -1212,6 +1253,242 @@ static void QScheduleListScaling(UIView *list) {
 
 %end
 
+static void QPositionLockWidget(UIView *widget, CGFloat x, CGFloat width, BOOL enabled) {
+    if (!widget) return;
+    NSValue *saved = objc_getAssociatedObject(widget, QLockClockOriginalFrameKey);
+    NSValue *savedTransform = objc_getAssociatedObject(widget, QLockClockOriginalTransformKey);
+    if (!enabled) {
+        if (saved) {
+            if (savedTransform) widget.transform = savedTransform.CGAffineTransformValue;
+            widget.frame = saved.CGRectValue;
+            objc_setAssociatedObject(widget, QLockClockOriginalFrameKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(widget, QLockClockOriginalTransformKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        return;
+    }
+    if (!saved) {
+        saved = [NSValue valueWithCGRect:widget.frame];
+        objc_setAssociatedObject(widget, QLockClockOriginalFrameKey, saved, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        savedTransform = [NSValue valueWithCGAffineTransform:widget.transform];
+        objc_setAssociatedObject(widget, QLockClockOriginalTransformKey, savedTransform, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    CGRect original = saved.CGRectValue;
+    CGFloat scale = width / MAX(1, original.size.width);
+    CGAffineTransform target = CGAffineTransformScale(savedTransform.CGAffineTransformValue, scale, scale);
+    if (!CGAffineTransformEqualToTransform(widget.transform, target)) widget.transform = target;
+    CGPoint center = CGPointMake(x + width / 2, CGRectGetMidY(original));
+    if (!CGPointEqualToPoint(widget.center, center)) widget.center = center;
+}
+
+static void QPositionLowerWidgets(UIView *widget, BOOL enabled) {
+    if (!widget) return;
+    NSValue *saved = objc_getAssociatedObject(widget, QLockClockOriginalFrameKey);
+    if (!enabled) {
+        if (saved) { widget.frame = saved.CGRectValue; objc_setAssociatedObject(widget, QLockClockOriginalFrameKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+        return;
+    }
+    CGRect original = saved ? saved.CGRectValue : widget.frame;
+    if (!saved || !CGRectEqualToRect(widget.frame, CGRectOffset(original, 0, -90))) {
+        original = widget.frame;
+        saved = [NSValue valueWithCGRect:original];
+        objc_setAssociatedObject(widget, QLockClockOriginalFrameKey, saved, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    CGRect target = CGRectOffset(original, 0, -90);
+    if (!CGRectEqualToRect(widget.frame, target)) widget.frame = target;
+}
+
+// The native clock remains in the hierarchy for layout and taps. The date
+// comes from the user's existing top widget, so its format stays untouched.
+static void QStyleLockClock(UIView *dateView) {
+    if (qStylingLockClock || !dateView.window) return;
+    qStylingLockClock = YES;
+    @try {
+        UIView *nativeText = nil;
+        UIView *topWidget = nil;
+        UIView *subtitle = nil;
+        UILabel *subtitleText = nil;
+        UIView *bottomWidgets = nil;
+        NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:dateView];
+        for (NSUInteger i = 0; i < queue.count && i < 100; i++) {
+            UIView *node = queue[i];
+            NSString *name = NSStringFromClass(node.class);
+            if ([name isEqualToString:@"CSProminentTimeView"]) {
+                for (UIView *child in node.subviews)
+                    if ([child isKindOfClass:UILabel.class]) { nativeText = child; break; }
+            }
+            if ([name isEqualToString:@"CSProminentEmptyElementView"] && !node.hidden && node.alpha > 0.01) {
+                CGRect visibleFrame = [node convertRect:node.bounds toView:dateView];
+                if (node.bounds.size.height <= 50 && CGRectIntersectsRect(visibleFrame, dateView.bounds)) topWidget = node;
+                else if (node.bounds.size.height >= 60) bottomWidgets = node;
+            }
+            if ([name isEqualToString:@"CSProminentSubtitleDateView"] && !node.hidden) {
+                subtitle = node;
+                for (UIView *child in node.subviews)
+                    if ([child isKindOfClass:UILabel.class]) { subtitleText = (UILabel *)child; break; }
+            }
+            [queue addObjectsFromArray:node.subviews];
+        }
+        if (!topWidget) topWidget = subtitle;
+        UIView *topContent = topWidget;
+        if (topWidget != subtitle) {
+            NSMutableArray<UIView *> *widgetViews = [NSMutableArray arrayWithObject:topWidget];
+            for (NSUInteger i = 0; i < widgetViews.count && i < 40; i++) {
+                UIView *view = widgetViews[i];
+                NSString *name = NSStringFromClass(view.class);
+                if ([name isEqualToString:@"CHUISWidgetHostViewControllerView"])
+                    topContent = view;
+                if ([name isEqualToString:@"_UISceneLayerHostContainerView"]) {
+                    topContent = view;
+                    break;
+                }
+                [widgetViews addObjectsFromArray:view.subviews];
+            }
+        }
+        UILabel *small = objc_getAssociatedObject(dateView, QLockClockLabelKey);
+        UIView *previousContent = objc_getAssociatedObject(dateView, QLockClockTopContentKey);
+        if (previousContent && previousContent != topContent)
+            QPositionLockWidget(previousContent, 0, 0, NO);
+        objc_setAssociatedObject(dateView, QLockClockTopContentKey, topContent, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        BOOL enabled = [qSettings[@"masterEnabled"] boolValue] && [qSettings[@"smallLockClock"] boolValue];
+        if (!enabled || !nativeText || !topWidget) {
+            if (small) { [small removeFromSuperview]; objc_setAssociatedObject(dateView, QLockClockLabelKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+            QPositionLockWidget(topContent, 0, 0, NO);
+            objc_setAssociatedObject(dateView, QLockClockTopContentKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            QPositionLowerWidgets(bottomWidgets, NO);
+            if (nativeText) {
+                NSNumber *original = objc_getAssociatedObject(nativeText, QLockClockOriginalHiddenKey);
+                if (original) { nativeText.hidden = original.boolValue; objc_setAssociatedObject(nativeText, QLockClockOriginalHiddenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+            }
+            if (subtitleText) {
+                NSNumber *original = objc_getAssociatedObject(subtitleText, QLockClockOriginalHiddenKey);
+                if (original) { subtitleText.hidden = original.boolValue; objc_setAssociatedObject(subtitleText, QLockClockOriginalHiddenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+            }
+            return;
+        }
+        if (!objc_getAssociatedObject(nativeText, QLockClockOriginalHiddenKey))
+            objc_setAssociatedObject(nativeText, QLockClockOriginalHiddenKey, @(nativeText.hidden), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        nativeText.hidden = YES;
+        CGFloat fontSize = [qSettings[@"smallLockClockFontSize"] doubleValue];
+        fontSize = isfinite(fontSize) ? MAX(18, MIN(30, fontSize)) : 23;
+        NSDateFormatter *time = [NSDateFormatter new];
+        [time setLocalizedDateFormatFromTemplate:@"jm"];
+        NSString *clock = [time stringFromDate:NSDate.date];
+        CGFloat clockWidth = ceil([clock sizeWithAttributes:@{NSFontAttributeName: [UIFont systemFontOfSize:fontSize weight:UIFontWeightBold]}].width) + 4;
+        CGFloat widgetWidth = MIN(300, MAX(180, dateView.bounds.size.width - 30 - clockWidth - 12));
+        CGFloat rowLeft = (dateView.bounds.size.width - clockWidth - 12 - widgetWidth) / 2;
+        if (topWidget != subtitle) {
+            CGFloat parentX = [topContent.superview convertPoint:CGPointMake(rowLeft + clockWidth + 32, 0)
+                                                       fromView:dateView].x;
+            QPositionLockWidget(topContent, parentX, widgetWidth, YES);
+        }
+        QPositionLowerWidgets(bottomWidgets, YES);
+        UIView *textHost = nativeText.superview.superview ?: nativeText.superview;
+        if (!small) {
+            small = [[UILabel alloc] initWithFrame:CGRectZero];
+            small.userInteractionEnabled = NO;
+            small.textAlignment = NSTextAlignmentCenter;
+            small.adjustsFontSizeToFitWidth = YES;
+            small.minimumScaleFactor = 0.8;
+            objc_setAssociatedObject(dateView, QLockClockLabelKey, small, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        if (small.superview != textHost) [textHost addSubview:small];
+        CGRect topFrame = [topWidget convertRect:topWidget.bounds toView:dateView];
+        CGRect frameInDate = topWidget == subtitle
+            ? CGRectMake(0, CGRectGetMidY(topFrame) - 21, dateView.bounds.size.width, 42)
+            : CGRectMake(rowLeft + 68, CGRectGetMidY(topFrame) - 21, clockWidth, 42);
+        small.frame = [textHost convertRect:frameInDate fromView:dateView];
+        UIColor *color = ((UILabel *)nativeText).textColor ?: UIColor.whiteColor;
+        small.font = [UIFont systemFontOfSize:fontSize weight:UIFontWeightBold];
+        small.textColor = color;
+        if (topWidget == subtitle && subtitleText) {
+            if (!objc_getAssociatedObject(subtitleText, QLockClockOriginalHiddenKey))
+                objc_setAssociatedObject(subtitleText, QLockClockOriginalHiddenKey, @(subtitleText.hidden), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            NSString *date = subtitleText.text;
+            NSString *normalDate = objc_getAssociatedObject(subtitleText, QLockClockNormalDateKey);
+            NSDate *normalDay = objc_getAssociatedObject(subtitleText, QLockClockNormalDateDayKey);
+            if (date.length && (!normalDate || (normalDay && ![NSCalendar.currentCalendar isDate:normalDay inSameDayAsDate:NSDate.date]))) {
+                normalDate = date;
+                objc_setAssociatedObject(subtitleText, QLockClockNormalDateKey, date, OBJC_ASSOCIATION_COPY_NONATOMIC);
+                objc_setAssociatedObject(subtitleText, QLockClockNormalDateDayKey, NSDate.date, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            BOOL temporaryText = normalDate.length && date.length && ![date isEqualToString:normalDate];
+            if (!date.length) {
+                NSDateFormatter *format = [NSDateFormatter new];
+                [format setLocalizedDateFormatFromTemplate:@"MMMdEEEE"];
+                date = [format stringFromDate:NSDate.date];
+            }
+            if (!temporaryText) subtitleText.hidden = YES;
+            NSString *shownDate = normalDate.length ? normalDate : date;
+            NSMutableAttributedString *line = [[NSMutableAttributedString alloc] initWithString:[NSString stringWithFormat:@"%@   %@", clock, shownDate]];
+            [line addAttribute:NSFontAttributeName value:[UIFont systemFontOfSize:fontSize weight:UIFontWeightMedium]
+                         range:NSMakeRange(clock.length + 3, shownDate.length)];
+            if (temporaryText)
+                [line addAttribute:NSForegroundColorAttributeName value:UIColor.clearColor
+                             range:NSMakeRange(clock.length + 3, shownDate.length)];
+            small.attributedText = line;
+        } else small.text = clock;
+    } @finally { qStylingLockClock = NO; }
+}
+
+static void QRestyleLockClockForWidget(UIView *widget) {
+    for (UIView *view = widget.superview; view; view = view.superview) {
+        if ([view isKindOfClass:objc_getClass("SBFLockScreenDateView")]) {
+            QStyleLockClock(view);
+            return;
+        }
+    }
+}
+
+%group QSmallLockClock
+%hook SBFLockScreenDateView
+- (void)layoutSubviews {
+    %orig;
+    [qLockClockViews addObject:self];
+    QStyleLockClock(self);
+}
+- (void)didMoveToWindow {
+    %orig;
+    if (self.window) { [qLockClockViews addObject:self]; QStyleLockClock(self); }
+}
+%end
+%hook CSProminentEmptyElementView
+- (void)setFrame:(CGRect)frame {
+    %orig;
+    if (self.window && frame.size.height >= 60 && !qStylingLockClock)
+        QRestyleLockClockForWidget(self);
+}
+- (void)didMoveToWindow {
+    %orig;
+    if (self.window) QRestyleLockClockForWidget(self);
+}
+- (void)layoutSubviews {
+    %orig;
+    QRestyleLockClockForWidget(self);
+}
+%end
+%hook CSProminentSubtitleDateView
+- (void)layoutSubviews {
+    %orig;
+    if (self.window && !qStylingLockClock) QRestyleLockClockForWidget(self);
+}
+%end
+%hook _UIAnimatingLabel
+- (void)setHidden:(BOOL)hidden {
+    UIView *parent = self.superview;
+    NSString *normalDate = objc_getAssociatedObject(self, QLockClockNormalDateKey);
+    BOOL isLockDate = [parent isKindOfClass:objc_getClass("CSProminentSubtitleDateView")];
+    if (!qStylingLockClock && isLockDate && normalDate.length &&
+        [qSettings[@"masterEnabled"] boolValue] && [qSettings[@"smallLockClock"] boolValue]) {
+        if ([self.text isEqualToString:normalDate]) hidden = YES;
+        %orig(hidden);
+        QRestyleLockClockForWidget(self);
+        return;
+    }
+    %orig(hidden);
+}
+%end
+%end
+
 %ctor {
     @autoreleasepool {
         if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.MediaRemoteUI"]) {
@@ -1223,11 +1500,18 @@ static void QScheduleListScaling(UIView *list) {
         qActiveNotifications = [NSHashTable weakObjectsHashTable];
         qActiveLists = [NSHashTable weakObjectsHashTable];
         qActiveBanners = [NSHashTable weakObjectsHashTable];
+        qLockClockViews = [NSHashTable weakObjectsHashTable];
         QLoadSettings();
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
                                         QChanged, CFSTR("com.gushi.quart17/preferenceschanged"),
                                         NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"]) {
+            [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
+                object:nil queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *notification) {
+                    QLoadSettings();
+                    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                        CFSTR("com.gushi.quart17/preferenceschanged"), NULL, NULL, YES);
+                }];
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
                                             QNativeArtworkVisibilityChanged,
                                             CFSTR("com.gushi.quart17/nativeartworkexpanded"), NULL,
@@ -1248,5 +1532,11 @@ static void QScheduleListScaling(UIView *list) {
         if (objc_getClass("NCNotificationListCell")) %init(QScale);
         if (objc_getClass("NCNotificationMasterList")) %init(QMasterGesture);
         if (objc_getClass("SBSearchPresenter")) %init(QSearchGesture);
+        if (objc_getClass("SBFLockScreenDateView")) {
+            %init(QSmallLockClock);
+            [NSTimer scheduledTimerWithTimeInterval:20 repeats:YES block:^(__unused NSTimer *timer) {
+                for (UIView *dateView in qLockClockViews.allObjects) QStyleLockClock(dateView);
+            }];
+        }
     }
 }

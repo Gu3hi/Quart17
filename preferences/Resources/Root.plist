@@ -30,6 +30,50 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
+			<string>锁屏时间</string>
+			<key>footerText</key>
+			<string>时间与顶部日期并排居中，下方小组件同步上移。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>key</key>
+			<string>smallLockClock</string>
+			<key>label</key>
+			<string>小时间</string>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSStaticTextCell</string>
+			<key>cellClass</key>
+			<string>QWidthSliderCell</string>
+			<key>default</key>
+			<integer>23</integer>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>key</key>
+			<string>smallLockClockFontSize</string>
+			<key>label</key>
+			<string>时间与日期字号</string>
+			<key>min</key>
+			<integer>18</integer>
+			<key>max</key>
+			<integer>30</integer>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+			<key>unit</key>
+			<string>pt</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
 			<string>通知与播放器</string>
 			<key>footerText</key>
 			<string>调整内容、尺寸和交互，不调整玻璃材质。</string>

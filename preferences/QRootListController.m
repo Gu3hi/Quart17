@@ -11,6 +11,10 @@
 #define QJbroot(path) [@"/var/jb" stringByAppendingString:(path)]
 #endif
 #import <notify.h>
+#import <spawn.h>
+#import <errno.h>
+#import <sys/wait.h>
+#import <string.h>
 #import <objc/runtime.h>
 
 #pragma mark - 设计主题（DESIGN.md）
@@ -125,6 +129,14 @@ static void QWritePref(NSString *key, id value) {
     NSMutableDictionary *settings = [[NSDictionary dictionaryWithContentsOfFile:QPrefsPath()] mutableCopy]
                                      ?: [NSMutableDictionary dictionary];
     settings[key] = value;
+    int flagsToken = -1;
+    if (notify_register_check("com.gushi.quart17/artworkflags", &flagsToken) == NOTIFY_STATUS_OK) {
+        uint64_t flags = 0x51710000ULL;
+        for (NSUInteger i = 0; i < 3; i++)
+            if ([settings[@[@"masterEnabled", @"playerEnabled", @"showProgress"][i]] ?: @YES boolValue]) flags |= 1ULL << i;
+        notify_set_state(flagsToken, flags);
+        notify_cancel(flagsToken);
+    }
     [settings writeToFile:QPrefsPath() atomically:YES];
     CFPreferencesSetValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)value,
         CFSTR("com.gushi.quart17"), kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
@@ -430,6 +442,10 @@ static void QWritePref(NSString *key, id value) {
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
         initWithTitle:[self localized:@"刷新" english:@"Refresh"]
         style:UIBarButtonItemStylePlain target:self action:@selector(respring:)];
+    UIBarButtonItem *restart = [[UIBarButtonItem alloc]
+        initWithTitle:[self localized:@"注销" english:@"Respring"]
+        style:UIBarButtonItemStylePlain target:self action:@selector(confirmRespring:)];
+    self.navigationItem.rightBarButtonItems = @[restart, self.navigationItem.rightBarButtonItem];
     if ([[self qPlistName] isEqualToString:@"Root"]) {
         self.quartHeader = [[QHeroView alloc] initWithFrame:CGRectMake(0, 0, self.table.bounds.size.width, 160)];
         self.table.tableHeaderView = self.quartHeader;
@@ -442,6 +458,37 @@ static void QWritePref(NSString *key, id value) {
         self.quartHeader.frame = CGRectMake(0, 0, self.table.bounds.size.width, 160);
         self.table.tableHeaderView = self.quartHeader;
     }
+}
+
+- (void)confirmRespring:(id)sender {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:
+        [self localized:@"注销并重新载入" english:@"Respring"]
+        message:[self localized:@"注销会重新载入插件和系统界面，可能中断当前播放。普通设置可先使用刷新。"
+                          english:@"Reload tweaks and the system interface. Playback may stop. Use Refresh for ordinary settings."]
+        preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:[self localized:@"稍后" english:@"Later"]
+        style:UIAlertActionStyleCancel handler:nil]];
+    __weak typeof(self) weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:[self localized:@"立即注销" english:@"Respring now"]
+        style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *action) {
+            NSString *path = QJbroot(@"/usr/bin/sbreload");
+            if (![NSFileManager.defaultManager isExecutableFileAtPath:path]) path = @"/usr/bin/sbreload";
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                pid_t pid;
+                char *args[] = {(char *)path.UTF8String, NULL};
+                int error = posix_spawn(&pid, path.UTF8String, NULL, NULL, args, NULL);
+                int status = 0;
+                if (!error && waitpid(pid, &status, 0) < 0) error = errno;
+                if (error || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                    NSString *message = error ? [NSString stringWithUTF8String:strerror(error)] :
+                        [NSString stringWithFormat:@"sbreload: %d", status];
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [weakSelf showAlertTitle:[weakSelf localized:@"注销失败" english:@"Respring failed"] message:message];
+                    });
+                }
+            });
+        }]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)respring:(id)sender {
@@ -468,6 +515,8 @@ static void QWritePref(NSString *key, id value) {
 + (void)qApplyIconsAndTranslations:(NSArray<PSSpecifier *> *)specifiers isChinese:(BOOL)isChinese {
         NSDictionary *symbols = @{
             @"masterEnabled": @"power", @"enabled": @"bell.badge",
+            @"smallLockClock": @"clock",
+            @"smallLockClockFontSize": @"textformat.size",
             @"clearAllEnabled": @"arrow.down.to.line",
             @"clearHapticEnabled": @"iphone.radiowaves.left.and.right",
             @"widthScale": @"rectangle.compress.vertical",
@@ -495,6 +544,8 @@ static void QWritePref(NSString *key, id value) {
         };
          NSDictionary *english = @{
              @"通知与播放器": @"Notifications & Player",
+             @"锁屏时间": @"Lock Screen Clock", @"小时间": @"Compact clock",
+             @"时间与日期字号": @"Clock & date size",
              @"通知排版与缩放": @"Notification layout & size",
              @"播放器布局与操作": @"Player layout & controls",
              @"下拉清理": @"Swipe to clear",
@@ -532,6 +583,7 @@ static void QWritePref(NSString *key, id value) {
         };
          NSDictionary *englishFooters = @{
              @"Quart17 负责通知排版、播放器布局与操作、下拉清理；玻璃外观请到 Aura 设置。": @"Quart17 controls notification layout, player controls, and swipe to clear. Glass appearance is in Aura.",
+             @"时间与顶部日期并排居中，下方小组件同步上移。": @"Center the compact clock beside the top date and move the widgets up.",
              @"调整内容、尺寸和交互，不调整玻璃材质。": @"Adjust content, size, and interaction. Glass materials are in Aura.",
             @"锁屏列表大小控制通知宽度。开启桌面横幅缩放后，弹出的横幅使用相同的大小。": @"Lock Screen list size controls notification width. Enable banner scaling to use the same size for incoming banners.",
             @"关闭总开关会停用通知与锁屏播放器样式，并收起以下设置。": @"Turn off to disable both styles and collapse the options below.",

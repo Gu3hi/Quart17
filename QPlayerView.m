@@ -306,7 +306,9 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 }
 
 - (void)setHidden:(BOOL)hidden {
+    if (self.hidden == hidden) return;
     [super setHidden:hidden];
+    [self qUpdateRefreshLifecycle];
     if (!self.suppressSiblingViews) return;
     UIView *host = self.superview;
     if (!host) return;
@@ -440,12 +442,16 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 - (void)didMoveToWindow {
     [super didMoveToWindow];
     [self updateAccent];
+    [self qUpdateRefreshLifecycle];
+}
+
+- (void)qUpdateRefreshLifecycle {
     [self.timer invalidate];
     self.timer = nil;
     [self.progressDisplayLink invalidate];
     self.progressDisplayLink = nil;
     [NSNotificationCenter.defaultCenter removeObserver:self name:@"kMRMediaRemoteNowPlayingInfoDidChangeNotification" object:nil];
-    if (self.window) {
+    if (self.window && !self.hidden) {
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(nowPlayingChanged:)
                                                 name:@"kMRMediaRemoteNowPlayingInfoDidChangeNotification" object:nil];
         [self refresh];
@@ -464,7 +470,7 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 }
 
 - (void)updateVisualProgress {
-    if (self.scrubbing || self.duration <= 0 || ![self.settings[@"showProgress"] boolValue]) return;
+    if (self.hidden || !self.window || self.scrubbing || self.duration <= 0 || ![self.settings[@"showProgress"] boolValue]) return;
     CFTimeInterval now = CACurrentMediaTime();
     NSTimeInterval elapsed = self.progressAnchorElapsed + (self.playing ? MAX(0, now - self.progressAnchorTime) : 0);
     self.elapsed = MIN(self.duration, MAX(0, elapsed));
@@ -620,7 +626,7 @@ static NSTimeInterval QParseTime(NSString *text) {
 
 - (void)refresh {
     if (self.usesNativeMetadataFallback && self.superview) [self seedFromNativePlayer:self.superview];
-    if (!self.window || !QLoadMediaRemote()) return;
+    if (!self.window || self.hidden || !QLoadMediaRemote()) return;
     __weak typeof(self) weakSelf = self;
     QGetInfo(dispatch_get_main_queue(), ^(CFDictionaryRef result) {
         QPlayerView *strongSelf = weakSelf;

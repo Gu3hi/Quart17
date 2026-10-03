@@ -38,6 +38,59 @@ static const void *qShadowWasHiddenKey = &qShadowWasHiddenKey;
 static const void *qArtworkTapKey = &qArtworkTapKey;
 static const void *qAccentImageKey = &qAccentImageKey, *qAccentColorKey = &qAccentColorKey;
 static const void *qSquareMaskKey = &qSquareMaskKey;
+static const void *qArtworkOriginalLayersKey = &qArtworkOriginalLayersKey;
+static int qArtworkFlagsToken = -1;
+
+static BOOL QArtworkFlag(NSUInteger bit, NSString *key) {
+    uint64_t state = 0;
+    if (qArtworkFlagsToken >= 0 && notify_get_state(qArtworkFlagsToken, &state) == NOTIFY_STATUS_OK &&
+        (state & ~7ULL) == 0x51710000ULL) return (state & (1ULL << bit)) != 0;
+    return [qArtworkSettings[key] ?: @YES boolValue];
+}
+
+static void QRememberArtworkLayer(UIView *view, CALayer *layer) {
+    NSMapTable *original = objc_getAssociatedObject(view, qArtworkOriginalLayersKey);
+    if (!original) {
+        original = [NSMapTable weakToStrongObjectsMapTable];
+        objc_setAssociatedObject(view, qArtworkOriginalLayersKey, original, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (![original objectForKey:layer]) [original setObject:
+        @[@(layer.cornerRadius), layer.cornerCurve ?: kCACornerCurveCircular,
+          @(layer.masksToBounds), layer.mask ?: NSNull.null,
+          [NSValue valueWithCATransform3D:layer.sublayerTransform]] forKey:layer];
+}
+
+static void QRestoreNativeArtwork(UIView *view) {
+    NSMapTable *original = objc_getAssociatedObject(view, qArtworkOriginalLayersKey);
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    for (CALayer *layer in original.keyEnumerator.allObjects) {
+        NSArray *state = [original objectForKey:layer];
+        layer.cornerRadius = [state[0] doubleValue];
+        layer.cornerCurve = state[1];
+        layer.masksToBounds = [state[2] boolValue];
+        layer.mask = state[3] == NSNull.null ? nil : state[3];
+        layer.sublayerTransform = [state[4] CATransform3DValue];
+        objc_setAssociatedObject(layer, kQLastShiftYKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    [CATransaction commit];
+    objc_setAssociatedObject(view, qArtworkOriginalLayersKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [objc_getAssociatedObject(view, qTrackKey) removeFromSuperlayer];
+    [objc_getAssociatedObject(view, qRingKey) removeFromSuperlayer];
+    objc_setAssociatedObject(view, qTrackKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(view, qRingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    UIGestureRecognizer *tap = objc_getAssociatedObject(view, qArtworkTapKey);
+    if (tap) [view removeGestureRecognizer:tap];
+    objc_setAssociatedObject(view, qArtworkTapKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if ([view respondsToSelector:@selector(artworkShadowView)]) {
+        UIView *shadow = ((id (*)(id, SEL))objc_msgSend)(view, @selector(artworkShadowView));
+        NSNumber *hidden = objc_getAssociatedObject(shadow, qShadowWasHiddenKey);
+        if (hidden) shadow.hidden = hidden.boolValue;
+        objc_setAssociatedObject(shadow, qShadowWasHiddenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    [qProgressLink invalidate];
+    qProgressLink = nil;
+}
 
 static id QInfoValue(NSDictionary *info, CFStringRef *key, NSString *fallback) {
     return info[key && *key ? (__bridge NSString *)*key : fallback];
@@ -291,7 +344,7 @@ static UIColor *QArtworkAccent(UIImage *artwork) {
     return [UIColor colorWithRed:r green:g blue:b alpha:1];
 }
 
-static void QRoundArtworkLayers(CALayer *layer, CGSize imageSize, CGFloat radius,
+static void QRoundArtworkLayers(UIView *owner, CALayer *layer, CGSize imageSize, CGFloat radius,
                                 NSUInteger depth) {
     if (!layer || depth > 3) return;
     if ([layer isKindOfClass:CAShapeLayer.class]) return;
@@ -299,6 +352,7 @@ static void QRoundArtworkLayers(CALayer *layer, CGSize imageSize, CGFloat radius
     if (fabs(size.width - imageSize.width) < 40 &&
         fabs(size.height - imageSize.height) < 40 &&
         fabs(size.width - size.height) < 40) {
+        QRememberArtworkLayer(owner, layer);
         if (layer.mask) layer.mask = nil;
         if (fabs(layer.cornerRadius - radius) > 0.1) layer.cornerRadius = radius;
         if (![layer.cornerCurve isEqualToString:kCACornerCurveCircular])
@@ -306,17 +360,24 @@ static void QRoundArtworkLayers(CALayer *layer, CGSize imageSize, CGFloat radius
         if (!layer.masksToBounds) layer.masksToBounds = YES;
     }
     for (CALayer *child in layer.sublayers) {
-        QRoundArtworkLayers(child, imageSize, radius, depth + 1);
+        QRoundArtworkLayers(owner, child, imageSize, radius, depth + 1);
     }
 }
 
 static void QStyleNativeArtwork(UIView *view) {
+    [qArtworkViews addObject:view];
+    if (!QArtworkFlag(0, @"masterEnabled") || !QArtworkFlag(1, @"playerEnabled")) {
+        QRestoreNativeArtwork(view);
+        return;
+    }
     if (view.bounds.size.width < 150 || view.bounds.size.height < 150) return;
     SEL imageSelector = @selector(artworkImageView);
     if (![view respondsToSelector:imageSelector]) return;
     UIView *image = ((id (*)(id, SEL))objc_msgSend)(view, imageSelector);
     if (![image isKindOfClass:UIView.class] || CGRectIsEmpty(image.bounds)) return;
     UIView *ringHost = image.superview ?: view;
+    QRememberArtworkLayer(view, image.layer);
+    QRememberArtworkLayer(view, ringHost.layer);
     QApplyArtworkScale(image);
     CGFloat roundness = QArtworkRoundness();
     CGFloat side = MIN(image.bounds.size.width, image.bounds.size.height);
@@ -328,7 +389,7 @@ static void QStyleNativeArtwork(UIView *view) {
         if (fabs(size.width - image.bounds.size.width) < 40 &&
             fabs(size.height - image.bounds.size.height) < 40 &&
             fabs(size.width - size.height) < 40) {
-            QRoundArtworkLayers(part.layer, image.bounds.size, radius, 0);
+            QRoundArtworkLayers(view, part.layer, image.bounds.size, radius, 0);
         }
         if (part == view) break;
     }
@@ -338,7 +399,10 @@ static void QStyleNativeArtwork(UIView *view) {
         CGSize size = part.bounds.size;
         if (fabs(size.width - image.bounds.size.width) < 40 &&
             fabs(size.height - image.bounds.size.height) < 40)
-            if (part.layer.masksToBounds) part.layer.masksToBounds = NO;
+            if (part.layer.masksToBounds) {
+                QRememberArtworkLayer(view, part.layer);
+                part.layer.masksToBounds = NO;
+            }
         if (part == view) break;
     }
 
@@ -419,8 +483,7 @@ static void QStyleNativeArtwork(UIView *view) {
     // The compact player's progressStyle selects one of its three layouts.
     // Expanded system artwork has no progress bar or background track, so its
     // progress indication is always the artwork ring when progress is enabled.
-    BOOL showRing = !qArtworkSettings[@"showProgress"] ||
-                    [qArtworkSettings[@"showProgress"] boolValue];
+    BOOL showRing = QArtworkFlag(2, @"showProgress");
     track.hidden = !showRing;
     ring.hidden = !showRing;
     CGRect imageFrame = CGRectMake(CGRectGetMidX(image.frame) - side / 2,
@@ -519,6 +582,7 @@ static void QNativeArtworkSeekChanged(CFNotificationCenterRef center, void *obse
 }
 
 void QInstallNativeArtworkHooks(void) {
+    notify_register_check("com.gushi.quart17/artworkflags", &qArtworkFlagsToken);
     notify_register_check("com.gushi.quart17/playercorner", &qCornerStateToken);
     notify_register_check("com.gushi.quart17/artworkoffset", &qOffsetStateToken);
     notify_register_check("com.gushi.quart17/artworkseek", &qSeekStateToken);
