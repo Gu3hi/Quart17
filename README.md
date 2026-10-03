@@ -38,8 +38,8 @@ Quart17 brings a brand-new lock screen music player and notification experience 
 ## 安装要求 / Requirements
 
 - iOS 17.0 – 17.3.1
-- 越狱环境：Dopamine 2.x / RootHide
-- Jailbreak: Dopamine 2.x / RootHide
+- 越狱环境：Dopamine 2.x / RootHide（主要测试环境为 Relaxin 越狱 + RootHide）
+- Jailbreak: Dopamine 2.x / RootHide (primarily tested on Relaxin jailbreak + RootHide)
 - 架构：arm64 / arm64e
 - Architecture: arm64 / arm64e
 
@@ -89,6 +89,12 @@ After installation, find Quart17 in Settings to configure:
 
 MIT License — 详见 LICENSE 文件。
 
-## 作者 / Author
+## 致谢 / Credits
 
-[@Put_Story](https://github.com/Gu3hi)
+作者 / Author: [@Put_Story](https://github.com/Gu3hi)
+
+致敬 [@LaughingQuoll](https://github.com/LaughingQuoll) —— 原 Quart 插件的作者。
+永远怀念最好的开发者。
+
+In tribute to [@LaughingQuoll](https://github.com/LaughingQuoll) — the original author of the Quart tweak.
+Forever remembering the best developer.
