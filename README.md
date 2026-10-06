@@ -8,8 +8,8 @@ Quart17 为 iOS 17 越狱设备带来全新的锁屏音乐播放器与通知中�
 
 Quart17 brings a brand-new lock screen music player and notification experience to jailbroken iOS 17 devices. Since v2.1, glassmorphism effects have been split into the standalone tweak **Aura** — Quart17 now focuses on player functionality, notification layout, and gesture interactions.
 
-> **注意 / Note**: 如需玻璃拟态效果，请同时安装 [Aura](https://github.com/Gu3hi/Aura)（`com.gushi.aura`）。两者不可同时接管同一表面，Aura 负责所有玻璃渲染。
-> To get glassmorphism effects, install [Aura](https://github.com/Gu3hi/Aura) (`com.gushi.aura`) alongside. The two tweaks must not take over the same surfaces — Aura handles all glass rendering.
+> **注意 / Note**: 如需玻璃拟态效果，请同时安装 [Aura](https://github.com/Gu3hi/Aura-Releases/releases)（`com.gushi.aura`）。两者不可同时接管同一表面，Aura 负责所有玻璃渲染。
+> To get glassmorphism effects, install [Aura](https://github.com/Gu3hi/Aura-Releases/releases) (`com.gushi.aura`) alongside. The two tweaks must not take over the same surfaces — Aura handles all glass rendering.
 
 ## 功能 / Features
 
