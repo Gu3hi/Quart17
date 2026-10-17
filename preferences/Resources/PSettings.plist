@@ -36,28 +36,6 @@
 			<key>get</key>
 			<string>readPreferenceValue:</string>
 			<key>key</key>
-			<string>playerCornerRoundness</string>
-			<key>label</key>
-			<string>播放器圆角</string>
-			<key>max</key>
-			<real>1.0</real>
-			<key>min</key>
-			<real>0.0</real>
-			<key>percent</key>
-			<true/>
-			<key>set</key>
-			<string>setPreferenceValue:specifier:</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSStaticTextCell</string>
-			<key>cellClass</key>
-			<string>QWidthSliderCell</string>
-			<key>default</key>
-			<real>1.0</real>
-			<key>get</key>
-			<string>readPreferenceValue:</string>
-			<key>key</key>
 			<string>largeArtworkScale</string>
 			<key>label</key>
 			<string>大封面大小</string>

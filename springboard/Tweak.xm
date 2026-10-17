@@ -28,6 +28,8 @@ static void *QLockClockLabelKey = &QLockClockLabelKey;
 static void *QLockClockOriginalHiddenKey = &QLockClockOriginalHiddenKey;
 static void *QLockClockOriginalFrameKey = &QLockClockOriginalFrameKey;
 static void *QLockClockOriginalTransformKey = &QLockClockOriginalTransformKey;
+static void *QLockClockAppliedTransformKey = &QLockClockAppliedTransformKey;
+static void *QLockClockAppliedCenterKey = &QLockClockAppliedCenterKey;
 static void *QLockClockTopContentKey = &QLockClockTopContentKey;
 static void *QLockClockNormalDateKey = &QLockClockNormalDateKey;
 static void *QLockClockNormalDateDayKey = &QLockClockNormalDateDayKey;
@@ -44,7 +46,6 @@ static void *QBannerShadowHiddenKey = &QBannerShadowHiddenKey;
 static void *QCountBadgeKey = &QCountBadgeKey;
 static void *QStackKeyKey = &QStackKeyKey;
 static void *QRequestKey = &QRequestKey;
-static void *QNotificationCornerOriginalKey = &QNotificationCornerOriginalKey;
 
 // Try several KVC keys; returns the first non-nil value and reports which key hit.
 static id QTryKVCKeys(id obj, NSArray<NSString *> *keys, NSString **hitKeyOut) {
@@ -113,11 +114,11 @@ static void QLoadSettings(void) {
     if (!qSettings[@"progressStyle"]) {
         qSettings[@"progressStyle"] = [qSettings[@"backgroundProgress"] boolValue] ? @0 : @1;
     }
-    if (!qSettings[@"playerCornerRoundness"]) {
-        qSettings[@"playerCornerRoundness"] = saved[@"roundArtwork"] && ![saved[@"roundArtwork"] boolValue] ? @0 : @1;
-    }
+    NSDictionary *aura = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.gushi.aura.plist"];
+    qSettings[@"playerCornerRoundness"] = aura[@"playerCornerRoundness"] ?:
+        saved[@"playerCornerRoundness"] ?: (saved[@"roundArtwork"] && ![saved[@"roundArtwork"] boolValue] ? @0 : @1);
     if (!qSettings[@"largeArtworkRoundness"])
-        qSettings[@"largeArtworkRoundness"] = qSettings[@"playerCornerRoundness"];
+        qSettings[@"largeArtworkRoundness"] = saved[@"playerCornerRoundness"] ?: @1;
     if (qCornerStateToken < 0)
         notify_register_check("com.gushi.quart17/playercorner", &qCornerStateToken);
     if (qCornerStateToken >= 0) {
@@ -692,41 +693,6 @@ static void QRefreshStackStatesIn(UIView *container) {
 static void QStyle(UIView *root) {
     if (!root) return;
     [qActiveNotifications addObject:root];
-    static BOOL auraLoaded;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        for (uint32_t i = 0; i < _dyld_image_count(); i++) {
-            const char *path = _dyld_get_image_name(i);
-            const char *name = path ? strrchr(path, '/') : NULL;
-            if (name && strcmp(name + 1, "Aura.dylib") == 0) {
-                auraLoaded = YES;
-                break;
-            }
-        }
-    });
-    BOOL ownsCorner = !auraLoaded && [qSettings[@"masterEnabled"] boolValue];
-    CGFloat roundness = [qSettings[@"playerCornerRoundness"] doubleValue];
-    roundness = isfinite(roundness) ? MAX(0, MIN(1, roundness)) : 1;
-    for (UIView *view in @[root, QFind(root, @"MTMaterialView") ?: root]) {
-        NSArray *original = objc_getAssociatedObject(view, QNotificationCornerOriginalKey);
-        if (!ownsCorner) {
-            if (original) {
-                view.layer.cornerRadius = [original[0] doubleValue];
-                view.clipsToBounds = [original[1] boolValue];
-                view.layer.cornerCurve = original[2];
-                objc_setAssociatedObject(view, QNotificationCornerOriginalKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            }
-            continue;
-        }
-        if (view.bounds.size.height <= 0) continue;
-        if (!original)
-            objc_setAssociatedObject(view, QNotificationCornerOriginalKey,
-                @[@(view.layer.cornerRadius), @(view.clipsToBounds), view.layer.cornerCurve ?: kCACornerCurveCircular],
-                OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        view.layer.cornerRadius = view.bounds.size.height * roundness / 2;
-        view.layer.cornerCurve = kCACornerCurveCircular;
-        view.clipsToBounds = YES;
-    }
     QUpdateStackState(root);
 }
 
@@ -1177,21 +1143,30 @@ static void QScheduleListScaling(UIView *list) {
     %orig;
     if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"]) return;
     CGSize size = self.bounds.size;
-    if (size.width < 340 || size.width > 500 || size.height < 65 || size.height > 195) return;
-    if (!QHasAncestor(self, @"NCNotificationListCell")) return;
-    if (!QFind(self, @"CSActivityItemContentView")) return;
     QPlayerView *player = objc_getAssociatedObject(self, QSpringBoardPlayerKey);
-    // 播放器识别：MRUNowPlayingLabelView / MRUNowPlayingTimeControlsView 是
-    // MediaRemoteUI 原生视图，为强信号；_UISceneLayerHostContainerView 为弱
-    // 信号（远程进程承载，不一定在层级里）。任一命中即视为媒体播放器。
-    // QPlayerView 建出后会自验是否真有媒体在播，无媒体时自行隐藏。
-    BOOL mediaPlatter = size.height >= 145 &&
+    // 媒体播放器识别（2026-10-17 真机实测修正）：
+    // iOS 17 锁屏 Now Playing 的内容由远程场景宿主渲染（_UISceneLayerHostContainerView），
+    // 本地 MRUNowPlayingLabelView / MRUNowPlayingTimeControlsView 不一定存在，
+    // 不能只靠 MRU 做强信号；实测 Now Playing 高 137pt（通知 66~80pt），
+    // 故高度下限由 145 放宽到 120。远程场景容器也用于实时活动，
+    // 这里以 CSActivityItemContentView + 高度段 + NCNotificationListCell 三重限定，
+    // 每次布局都会重新验证，不会把通知误判为播放器。
+    BOOL mediaPlatter = size.width >= 340 && size.width <= 500 &&
+                        size.height >= 120 && size.height <= 195 &&
+                        QHasAncestor(self, @"NCNotificationListCell") &&
+                        QFind(self, @"CSActivityItemContentView") &&
                         (QFind(self, @"MRUNowPlayingLabelView") ||
                          QFind(self, @"MRUNowPlayingTimeControlsView") ||
                          QFind(self, @"_UISceneLayerHostContainerView"));
-    if (!mediaPlatter && !player) {
-        self.alpha = 1;
-        self.layer.opacity = 1;
+    if (!mediaPlatter) {
+        if (player) {
+            [player removeFromSuperview];
+            [qActivePlayers removeObject:player];
+            [qActivePlatters removeObject:self];
+            objc_setAssociatedObject(self, QSpringBoardPlayerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            self.alpha = 1;
+            self.layer.opacity = 1;
+        }
         return;
     }
     BOOL enabled = [qSettings[@"masterEnabled"] boolValue] && [qSettings[@"playerEnabled"] boolValue];
@@ -1204,6 +1179,39 @@ static void QScheduleListScaling(UIView *list) {
     UIView *container = self.superview;
     if (!container) return;
     if (!player) {
+        // 只允许最顶部的媒体 platter 拥有 QPlayerView（2026-10-17 实时活动误判修复）：
+        // 锁屏上 Now Playing 始终在最上方，实时活动在下方。若已有 player 属于
+        // 位置更高的 platter，则当前这个很可能是实时活动，保持原生不创建。
+        // 反之若当前 platter 更高，则移除旧 player，把位置让给当前。
+        UIWindow *win = self.window;
+        if (win) {
+            CGFloat thisY = [self convertRect:self.bounds toView:win].origin.y;
+            BOOL shouldCreate = YES;
+            for (UIView *otherPlatter in [[qActivePlatters allObjects] copy]) {
+                if (otherPlatter == self) continue;
+                UIWindow *otherWin = otherPlatter.window;
+                if (!otherWin) continue;
+                CGFloat otherY = [otherPlatter convertRect:otherPlatter.bounds toView:otherWin].origin.y;
+                if (otherY < thisY - 1) {
+                    shouldCreate = NO;
+                    break;
+                } else {
+                    QPlayerView *oldPlayer = objc_getAssociatedObject(otherPlatter, QSpringBoardPlayerKey);
+                    if (oldPlayer) {
+                        [oldPlayer removeFromSuperview];
+                        [qActivePlayers removeObject:oldPlayer];
+                    }
+                    [qActivePlatters removeObject:otherPlatter];
+                    objc_setAssociatedObject(otherPlatter, QSpringBoardPlayerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    otherPlatter.alpha = 1;
+                    otherPlatter.layer.opacity = 1;
+                }
+            }
+            if (!shouldCreate) return;
+        } else if (qActivePlayers.count > 0) {
+            // 取不到 window 时退化为“先到先得”，避免重复创建。
+            return;
+        }
         player = [[QPlayerView alloc] initWithFrame:CGRectZero];
         [player setSuppressSiblingViews:NO];
         [player setUsesNativeMetadataFallback:NO];
@@ -1257,26 +1265,53 @@ static void QPositionLockWidget(UIView *widget, CGFloat x, CGFloat width, BOOL e
     if (!widget) return;
     NSValue *saved = objc_getAssociatedObject(widget, QLockClockOriginalFrameKey);
     NSValue *savedTransform = objc_getAssociatedObject(widget, QLockClockOriginalTransformKey);
-    if (!enabled) {
-        if (saved) {
-            if (savedTransform) widget.transform = savedTransform.CGAffineTransformValue;
-            widget.frame = saved.CGRectValue;
-            objc_setAssociatedObject(widget, QLockClockOriginalFrameKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            objc_setAssociatedObject(widget, QLockClockOriginalTransformKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-        return;
-    }
-    if (!saved) {
+    // 远程日期组件首次挂载可能尚无尺寸，不能缓存零尺寸作为后续缩放基准。
+    if (enabled && (widget.bounds.size.width <= 0 || widget.bounds.size.height <= 0 ||
+        widget.frame.size.width <= 0 || widget.frame.size.height <= 0)) return;
+    if (!saved && enabled) {
         saved = [NSValue valueWithCGRect:widget.frame];
         objc_setAssociatedObject(widget, QLockClockOriginalFrameKey, saved, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         savedTransform = [NSValue valueWithCGAffineTransform:widget.transform];
         objc_setAssociatedObject(widget, QLockClockOriginalTransformKey, savedTransform, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
+    if (!saved) return;
     CGRect original = saved.CGRectValue;
+    NSValue *appliedTransform = objc_getAssociatedObject(widget, QLockClockAppliedTransformKey);
+    NSValue *appliedCenter = objc_getAssociatedObject(widget, QLockClockAppliedCenterKey);
+    BOOL hasBounds = widget.bounds.size.width > 0 && widget.bounds.size.height > 0;
+    CGAffineTransform nativeTransform = savedTransform ? savedTransform.CGAffineTransformValue : widget.transform;
+    if (hasBounds && appliedTransform && !CGAffineTransformEqualToTransform(widget.transform, appliedTransform.CGAffineTransformValue))
+        nativeTransform = widget.transform;
+    CGPoint nativeCenter = CGPointMake(CGRectGetMidX(original) - savedTransform.CGAffineTransformValue.tx,
+                                       CGRectGetMidY(original) - savedTransform.CGAffineTransformValue.ty);
+    if (hasBounds && appliedCenter && !CGPointEqualToPoint(widget.center, appliedCenter.CGPointValue))
+        nativeCenter = widget.center;
+    // Remote widgets can change bounds without creating a new host view.
+    CGSize nativeSize = hasBounds ? CGRectApplyAffineTransform(widget.bounds, nativeTransform).size : original.size;
+    original = CGRectMake(nativeCenter.x + nativeTransform.tx - nativeSize.width / 2,
+                          nativeCenter.y + nativeTransform.ty - nativeSize.height / 2,
+                          nativeSize.width, nativeSize.height);
+    saved = [NSValue valueWithCGRect:original];
+    savedTransform = [NSValue valueWithCGAffineTransform:nativeTransform];
+    objc_setAssociatedObject(widget, QLockClockOriginalFrameKey, saved, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(widget, QLockClockOriginalTransformKey, savedTransform, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (!enabled) {
+        widget.transform = savedTransform.CGAffineTransformValue;
+        widget.frame = saved.CGRectValue;
+        objc_setAssociatedObject(widget, QLockClockOriginalFrameKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(widget, QLockClockOriginalTransformKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(widget, QLockClockAppliedTransformKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(widget, QLockClockAppliedCenterKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
     CGFloat scale = width / MAX(1, original.size.width);
-    CGAffineTransform target = CGAffineTransformScale(savedTransform.CGAffineTransformValue, scale, scale);
+    CGAffineTransform target = CGAffineTransformScale(nativeTransform, scale, scale);
+    CGPoint center = CGPointMake(x + width / 2 - target.tx, CGRectGetMidY(original) - target.ty);
+    objc_setAssociatedObject(widget, QLockClockAppliedTransformKey,
+        [NSValue valueWithCGAffineTransform:target], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(widget, QLockClockAppliedCenterKey,
+        [NSValue valueWithCGPoint:center], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (!CGAffineTransformEqualToTransform(widget.transform, target)) widget.transform = target;
-    CGPoint center = CGPointMake(x + width / 2, CGRectGetMidY(original));
     if (!CGPointEqualToPoint(widget.center, center)) widget.center = center;
 }
 
@@ -1417,7 +1452,8 @@ static void QStyleLockClock(UIView *dateView) {
                 [format setLocalizedDateFormatFromTemplate:@"MMMdEEEE"];
                 date = [format stringFromDate:NSDate.date];
             }
-            if (!temporaryText) subtitleText.hidden = YES;
+            // 临时提示期间日期副本会透明，必须同时显示原生文字。
+            subtitleText.hidden = !temporaryText;
             NSString *shownDate = normalDate.length ? normalDate : date;
             NSMutableAttributedString *line = [[NSMutableAttributedString alloc] initWithString:[NSString stringWithFormat:@"%@   %@", clock, shownDate]];
             [line addAttribute:NSFontAttributeName value:[UIFont systemFontOfSize:fontSize weight:UIFontWeightMedium]
@@ -1504,6 +1540,9 @@ static void QRestyleLockClockForWidget(UIView *widget) {
         QLoadSettings();
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
                                         QChanged, CFSTR("com.gushi.quart17/preferenceschanged"),
+                                        NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+                                        QChanged, CFSTR("com.gushi.aura/preferenceschanged"),
                                         NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"]) {
             [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification

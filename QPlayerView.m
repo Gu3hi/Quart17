@@ -252,6 +252,8 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 @property (nonatomic, strong) AVRoutePickerView *routeView;
 @property (nonatomic, strong) NSTimer *timer;
 @property (nonatomic, strong) CADisplayLink *progressDisplayLink;
+@property (nonatomic) BOOL refreshSuspended;
+@property (nonatomic) CGSize appliedSettingsSize;
 @property (nonatomic) NSTimeInterval duration;
 @property (nonatomic) NSTimeInterval elapsed;
 @property (nonatomic) NSTimeInterval progressAnchorElapsed;
@@ -276,6 +278,8 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 - (CGFloat)sizeFactor;
 - (CGFloat)artworkSide;
 - (void)updateScaledFonts;
+- (BOOL)qRefreshVisible;
+- (void)qUpdateRefreshLifecycle;
 @end
 
 @implementation QPlayerView
@@ -325,6 +329,12 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
         self.hidden = NO;
         self.suppressSiblingViews = YES;
         self.usesNativeMetadataFallback = YES;
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(nowPlayingChanged:)
+            name:@"kMRMediaRemoteNowPlayingInfoDidChangeNotification" object:nil];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(qSuspendRefresh:)
+            name:UIApplicationDidEnterBackgroundNotification object:nil];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(qResumeRefresh:)
+            name:UIApplicationWillEnterForegroundNotification object:nil];
 
         _backgroundProgress = [UIView new];
         _backgroundProgress.userInteractionEnabled = NO;
@@ -443,19 +453,56 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
     [super didMoveToWindow];
     [self updateAccent];
     [self qUpdateRefreshLifecycle];
+    [self refresh];
+}
+
+- (void)dealloc {
+    [NSNotificationCenter.defaultCenter removeObserver:self];
+    [self.timer invalidate];
+    [self.progressDisplayLink invalidate];
+}
+
+- (BOOL)qRefreshVisible {
+    if (!self.window || self.refreshSuspended || CGRectIsEmpty(self.bounds)) return NO;
+    for (UIView *view = self; view; view = view.superview)
+        if (view.hidden || view.alpha < 0.01) return NO;
+    return CGRectIntersectsRect([self convertRect:self.bounds toView:self.window], self.window.bounds);
+}
+
+- (void)qSuspendRefresh:(NSNotification *)notification {
+    self.refreshSuspended = YES;
+    [self qUpdateRefreshLifecycle];
+}
+
+- (void)qResumeRefresh:(NSNotification *)notification {
+    self.refreshSuspended = NO;
+    [self qUpdateRefreshLifecycle];
+    [self refresh];
 }
 
 - (void)qUpdateRefreshLifecycle {
-    [self.timer invalidate];
-    self.timer = nil;
-    [self.progressDisplayLink invalidate];
-    self.progressDisplayLink = nil;
-    [NSNotificationCenter.defaultCenter removeObserver:self name:@"kMRMediaRemoteNowPlayingInfoDidChangeNotification" object:nil];
-    if (self.window && !self.hidden) {
-        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(nowPlayingChanged:)
-                                                name:@"kMRMediaRemoteNowPlayingInfoDidChangeNotification" object:nil];
+    BOOL attached = self.window && !self.hidden && !self.refreshSuspended;
+    if (!attached) {
+        [self.timer invalidate];
+        self.timer = nil;
+    } else if (!self.timer) {
+        __weak typeof(self) weakSelf = self;
+        // shortcut: Probe hidden ancestors once per second; use host callbacks if faster resume is needed.
+        self.timer = [NSTimer timerWithTimeInterval:1 repeats:YES block:^(NSTimer *timer) {
+            QPlayerView *player = weakSelf;
+            if (!player) { [timer invalidate]; return; }
+            [player qUpdateRefreshLifecycle];
+            [player refresh];
+        }];
+        [NSRunLoop.mainRunLoop addTimer:self.timer forMode:NSRunLoopCommonModes];
         [self refresh];
-        self.timer = [NSTimer scheduledTimerWithTimeInterval:1 target:self selector:@selector(refresh) userInfo:nil repeats:YES];
+    }
+    BOOL animateProgress = [self qRefreshVisible] && self.playing && self.duration > 0 &&
+        [self.settings[@"showProgress"] boolValue];
+    if (!animateProgress) {
+        [self.progressDisplayLink invalidate];
+        self.progressDisplayLink = nil;
+    } else if (!self.progressDisplayLink) {
         self.progressDisplayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(updateVisualProgress)];
         self.progressDisplayLink.preferredFramesPerSecond = 30;
         [self.progressDisplayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
@@ -470,7 +517,8 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 }
 
 - (void)updateVisualProgress {
-    if (self.hidden || !self.window || self.scrubbing || self.duration <= 0 || ![self.settings[@"showProgress"] boolValue]) return;
+    if (![self qRefreshVisible]) { [self qUpdateRefreshLifecycle]; return; }
+    if (self.scrubbing || self.duration <= 0 || ![self.settings[@"showProgress"] boolValue]) return;
     CFTimeInterval now = CACurrentMediaTime();
     NSTimeInterval elapsed = self.progressAnchorElapsed + (self.playing ? MAX(0, now - self.progressAnchorTime) : 0);
     self.elapsed = MIN(self.duration, MAX(0, elapsed));
@@ -501,7 +549,12 @@ static const CGFloat kQPlayerArtworkDesign = 60.0;
 }
 
 - (void)applySettings:(NSDictionary *)settings {
+    if ([self.settings isEqualToDictionary:settings] && CGSizeEqualToSize(self.appliedSettingsSize, self.bounds.size)) {
+        [self qUpdateRefreshLifecycle];
+        return;
+    }
     self.settings = settings;
+    self.appliedSettingsSize = self.bounds.size;
     NSInteger progressStyle = [settings[@"progressStyle"] integerValue];
     if (progressStyle < 0 || progressStyle > 2) progressStyle = 0;
     CGFloat roundness = settings[@"playerCornerRoundness"] ? [settings[@"playerCornerRoundness"] doubleValue] : 1;
@@ -526,6 +579,7 @@ static const CGFloat kQPlayerArtworkDesign = 60.0;
     [self updateControlImages];
     [self updateAccent];
     [self updateScaledFonts];   // 字号只在这里更新（布局之外），避免布局递归
+    [self qUpdateRefreshLifecycle];
     [self setNeedsLayout];
 }
 
@@ -625,12 +679,13 @@ static NSTimeInterval QParseTime(NSString *text) {
 }
 
 - (void)refresh {
+    if (![self qRefreshVisible]) return;
     if (self.usesNativeMetadataFallback && self.superview) [self seedFromNativePlayer:self.superview];
-    if (!self.window || self.hidden || !QLoadMediaRemote()) return;
+    if (!QLoadMediaRemote()) return;
     __weak typeof(self) weakSelf = self;
     QGetInfo(dispatch_get_main_queue(), ^(CFDictionaryRef result) {
         QPlayerView *strongSelf = weakSelf;
-        if (!strongSelf) return;
+        if (!strongSelf || ![strongSelf qRefreshVisible]) return;
         NSDictionary *info = (__bridge NSDictionary *)result;
         NSString *title = info[QKey(QTitleKey, @"kMRMediaRemoteNowPlayingInfoTitle")];
         if (![title isKindOfClass:NSString.class] || title.length == 0) {
@@ -722,10 +777,12 @@ static NSTimeInterval QParseTime(NSString *text) {
         }
         strongSelf.elapsedLabel.text = QTime(strongSelf.elapsed);
         strongSelf.remainingLabel.text = [@"−" stringByAppendingString:QTime(MAX(0, strongSelf.duration - strongSelf.elapsed))];
+        [strongSelf qUpdateRefreshLifecycle];
     });
     if (QGetPlaying) QGetPlaying(dispatch_get_main_queue(), ^(Boolean isPlaying) {
         QPlayerView *strongSelf = weakSelf;
-        if (!strongSelf) return;
+        if (!strongSelf || ![strongSelf qRefreshVisible]) return;
+        BOOL changed = strongSelf.playing != isPlaying;
         if (strongSelf.playing != isPlaying) {
             CFTimeInterval now = CACurrentMediaTime();
             strongSelf.progressAnchorElapsed = strongSelf.elapsed;
@@ -735,7 +792,8 @@ static NSTimeInterval QParseTime(NSString *text) {
         if (QIsPlaybackPlaceholder(strongSelf.titleLabel.text) || strongSelf.titleLabel.text.length == 0) {
             strongSelf.titleLabel.text = isPlaying ? QPlayingPlaceholder() : @"";
         }
-        [strongSelf updateControlImages];
+        if (changed) [strongSelf updateControlImages];
+        [strongSelf qUpdateRefreshLifecycle];
     });
 }
 

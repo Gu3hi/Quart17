@@ -142,16 +142,18 @@ static void QWritePref(NSString *key, id value) {
         CFSTR("com.gushi.quart17"), kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
     CFPreferencesSynchronize(CFSTR("com.gushi.quart17"),
         kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
-    if ([key isEqualToString:@"playerCornerRoundness"] ||
-        [key isEqualToString:@"largeArtworkScale"] ||
+    if ([key isEqualToString:@"largeArtworkScale"] ||
         [key isEqualToString:@"largeArtworkRoundness"]) {
         int token = -1;
         if (notify_register_check("com.gushi.quart17/playercorner", &token) == NOTIFY_STATUS_OK) {
-            double corner = [settings[@"playerCornerRoundness"] ?: @1 doubleValue];
+            NSDictionary *aura = [NSDictionary dictionaryWithContentsOfFile:
+                @"/var/mobile/Library/Preferences/com.gushi.aura.plist"];
+            double corner = [aura[@"playerCornerRoundness"] ?: @1 doubleValue];
             corner = isfinite(corner) ? MAX(0, MIN(1, corner)) : 1;
             double scale = [settings[@"largeArtworkScale"] ?: @1 doubleValue];
             scale = isfinite(scale) ? MAX(0.6, MIN(1, scale)) : 1;
-            double expandedCorner = [settings[@"largeArtworkRoundness"] ?: @(corner) doubleValue];
+            id expandedValue = settings[@"largeArtworkRoundness"] ?: settings[@"playerCornerRoundness"] ?: @1;
+            double expandedCorner = [expandedValue doubleValue];
             expandedCorner = isfinite(expandedCorner) ? MAX(0, MIN(1, expandedCorner)) : corner;
             notify_set_state(token, ((uint64_t)llround(expandedCorner * 10000) << 48) |
                 ((uint64_t)llround(scale * 10000) << 32) |
@@ -261,10 +263,6 @@ static void QWritePref(NSString *key, id value) {
     self.detailTextLabel.hidden = YES;
     self.qTitleLabel.text = specifier.name;
     id raw = QReadPref(specifier.properties[@"key"], nil);
-    if (!raw && [specifier.properties[@"key"] isEqualToString:@"playerCornerRoundness"]) {
-        id legacy = QReadPref(@"roundArtwork", nil);
-        raw = legacy && ![legacy boolValue] ? @0 : @1;
-    }
     if (!raw && [specifier.properties[@"key"] isEqualToString:@"largeArtworkRoundness"])
         raw = QReadPref(@"playerCornerRoundness", @1);
     double v = [self rangeValue:raw ?: specifier.properties[@"default"]];
@@ -523,7 +521,6 @@ static void QWritePref(NSString *key, id value) {
             @"scaleBanners": @"rectangle.on.rectangle",
             @"disableListScaling": @"arrow.up.left.and.arrow.down.right",
             @"playerEnabled": @"play.rectangle.fill",
-            @"playerCornerRoundness": @"square.on.circle",
             @"largeArtworkScale": @"arrow.up.left.and.arrow.down.right",
             @"largeArtworkRoundness": @"square.on.circle",
             @"largeArtworkOffsetY": @"arrow.up.and.down",
@@ -563,7 +560,6 @@ static void QWritePref(NSString *key, id value) {
             @"大封面大小": @"Expanded artwork size",
             @"大封面圆角": @"Expanded artwork corners",
             @"大封面上下位移": @"Artwork vertical offset",
-            @"播放器圆角": @"Player corners",
             @"显示播放进度": @"Show playback progress",
             @"进度条样式": @"Progress style", @"隐藏控制按钮": @"Hide playback buttons",
             @"按钮图标目录": @"Button icon folder",
@@ -701,9 +697,6 @@ static void QWritePref(NSString *key, id value) {
     NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:QPrefsPath()];
     if ([specifier.properties[@"key"] isEqualToString:@"progressStyle"] && !settings[@"progressStyle"]) {
         return settings[@"backgroundProgress"] ? ([settings[@"backgroundProgress"] boolValue] ? @0 : @1) : @0;
-    }
-    if ([specifier.properties[@"key"] isEqualToString:@"playerCornerRoundness"] && !settings[@"playerCornerRoundness"]) {
-        return settings[@"roundArtwork"] && ![settings[@"roundArtwork"] boolValue] ? @0 : @1;
     }
     if ([specifier.properties[@"key"] isEqualToString:@"largeArtworkRoundness"] && !settings[@"largeArtworkRoundness"])
         return settings[@"playerCornerRoundness"] ?: @1;

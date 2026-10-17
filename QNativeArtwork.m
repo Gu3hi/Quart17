@@ -30,6 +30,7 @@ static CGFloat qSeekFraction;
 static CFTimeInterval qSeekHoldUntil;
 static BOOL qNativeArtworkExpanded;
 static CFTimeInterval qNativeArtworkExpandedAt;
+static NSTimer *qArtworkVisibilityTimer;
 static void *qMediaRemote;
 static void (*qGetNowPlayingInfo)(dispatch_queue_t, void (^)(CFDictionaryRef));
 static CFStringRef *qDurationKey, *qElapsedKey, *qRateKey, *qTitleKey, *qArtistKey;
@@ -249,6 +250,33 @@ static void QRefreshNativeProgress(void) {
     });
 }
 
+static BOOL QNativeArtworkVisible(UIView *view) {
+    if (!view.window || view.bounds.size.width < 150) return NO;
+    for (UIView *part = view; part; part = part.superview)
+        if (part.hidden || part.alpha < 0.05) return NO;
+    return CGRectIntersectsRect([view convertRect:view.bounds toView:view.window], view.window.bounds);
+}
+
+static void QSetNativeArtworkExpanded(BOOL expanded) {
+    if (qNativeArtworkExpanded == expanded) return;
+    qNativeArtworkExpanded = expanded;
+    [qArtworkVisibilityTimer invalidate];
+    qArtworkVisibilityTimer = nil;
+    if (expanded) {
+        qNativeArtworkExpandedAt = CACurrentMediaTime();
+        // Track the native cover independently of whether its progress ring is enabled.
+        qArtworkVisibilityTimer = [NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *timer) {
+            if (CACurrentMediaTime() - qNativeArtworkExpandedAt < 0.8) return;
+            for (UIView *view in qArtworkViews.allObjects) if (QNativeArtworkVisible(view)) return;
+            QSetNativeArtworkExpanded(NO);
+        }];
+        [NSRunLoop.mainRunLoop addTimer:qArtworkVisibilityTimer forMode:NSRunLoopCommonModes];
+    }
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+        expanded ? CFSTR("com.gushi.quart17/nativeartworkexpanded") :
+                   CFSTR("com.gushi.quart17/nativeartworkcollapsed"), NULL, NULL, YES);
+}
+
 static void QTickNativeProgress(void) {
     CFTimeInterval now = CACurrentMediaTime();
     if (now - qLastInfoRequest >= 1) {
@@ -259,26 +287,15 @@ static void QTickNativeProgress(void) {
         MAX(0, now - qProgressAnchorTime) * qPlaybackRate) / qDuration)) : 0;
     if (qSeekDragging || now < qSeekHoldUntil) fraction = qSeekFraction;
     BOOL anyVisible = NO;
-    BOOL artworkVisible = NO;
     for (UIView *view in qArtworkViews.allObjects) {
         CAShapeLayer *ring = objc_getAssociatedObject(view, qRingKey);
-        if (!view.window || view.hidden || view.alpha < 0.05 ||
-            view.bounds.size.width < 150) continue;
-        CGRect screenFrame = [view convertRect:view.bounds toView:nil];
-        if (!CGRectIntersectsRect(screenFrame, UIScreen.mainScreen.bounds)) continue;
-        artworkVisible = YES;
+        if (!QNativeArtworkVisible(view)) continue;
         if (!ring || ring.hidden) continue;
         anyVisible = YES;
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         ring.strokeEnd = fraction;
         [CATransaction commit];
-    }
-    if (qNativeArtworkExpanded && !artworkVisible &&
-        now - qNativeArtworkExpandedAt > 0.8) {
-        qNativeArtworkExpanded = NO;
-        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-            CFSTR("com.gushi.quart17/nativeartworkcollapsed"), NULL, NULL, YES);
     }
     if (!anyVisible) {
         [qProgressLink invalidate];
@@ -305,9 +322,7 @@ static QNativeArtworkTicker *qTicker;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (!qNativeArtworkExpanded) return;
-        qNativeArtworkExpanded = NO;
-        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-            CFSTR("com.gushi.quart17/nativeartworkcollapsed"), NULL, NULL, YES);
+        QSetNativeArtworkExpanded(NO);
     });
 }
 @end
@@ -545,10 +560,7 @@ static void QToggleNativeArtwork(CFNotificationCenterRef center, void *observer,
             ? ((id (*)(id, SEL))objc_msgSend)(coordinatorClass, @selector(shared)) : nil;
         if (coordinator && [coordinator respondsToSelector:@selector(handlePlatterTap)]) {
             ((BOOL (*)(id, SEL))objc_msgSend)(coordinator, @selector(handlePlatterTap));
-            qNativeArtworkExpanded = YES;
-            qNativeArtworkExpandedAt = CACurrentMediaTime();
-            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                CFSTR("com.gushi.quart17/nativeartworkexpanded"), NULL, NULL, YES);
+            QSetNativeArtworkExpanded(YES);
         }
     });
 }
@@ -557,6 +569,8 @@ static void QNativeArtworkChanged(CFNotificationCenterRef center, void *observer
                                   CFStringRef name, const void *object, CFDictionaryRef info) {
     dispatch_async(dispatch_get_main_queue(), ^{
         qArtworkSettings = QReadArtworkSettings();
+        if (!QArtworkFlag(0, @"masterEnabled") || !QArtworkFlag(1, @"playerEnabled"))
+            QSetNativeArtworkExpanded(NO);
         for (UIView *view in qArtworkViews.allObjects) QStyleNativeArtwork(view);
     });
 }
