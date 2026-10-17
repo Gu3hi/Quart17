@@ -1151,9 +1151,13 @@ static void QScheduleListScaling(UIView *list) {
     // 故高度下限由 145 放宽到 120。远程场景容器也用于实时活动，
     // 这里以 CSActivityItemContentView + 高度段 + NCNotificationListCell 三重限定，
     // 每次布局都会重新验证，不会把通知误判为播放器。
+    // 2026-10-17 17:47 补充：实时活动虽也在 NCNotificationListCell 里，但不在
+    // NCNotificationListSupplementaryHostingView 容器内（Now Playing 专属），
+    // 加此祖先检查以排除落单的实时活动。
     BOOL mediaPlatter = size.width >= 340 && size.width <= 500 &&
                         size.height >= 120 && size.height <= 195 &&
                         QHasAncestor(self, @"NCNotificationListCell") &&
+                        QHasAncestor(self, @"NCNotificationListSupplementaryHostingView") &&
                         QFind(self, @"CSActivityItemContentView") &&
                         (QFind(self, @"MRUNowPlayingLabelView") ||
                          QFind(self, @"MRUNowPlayingTimeControlsView") ||
@@ -1179,6 +1183,15 @@ static void QScheduleListScaling(UIView *list) {
     UIView *container = self.superview;
     if (!container) return;
     if (!player) {
+        // 2026-10-17 18:05：无媒体会话时不建播放器。落单的实时活动在无音乐时
+        // 满足全部结构条件会被误判；SBMediaController.nowPlayingApplication 为空
+        // 说明系统没有 Now Playing，直接返回保持原生。
+        Class mediaClass = objc_getClass("SBMediaController");
+        id media = [mediaClass respondsToSelector:@selector(sharedInstance)]
+            ? ((id (*)(id, SEL))objc_msgSend)(mediaClass, @selector(sharedInstance)) : nil;
+        id playingApp = [media respondsToSelector:@selector(nowPlayingApplication)]
+            ? ((id (*)(id, SEL))objc_msgSend)(media, @selector(nowPlayingApplication)) : nil;
+        if (!playingApp) return;
         // 只允许最顶部的媒体 platter 拥有 QPlayerView（2026-10-17 实时活动误判修复）：
         // 锁屏上 Now Playing 始终在最上方，实时活动在下方。若已有 player 属于
         // 位置更高的 platter，则当前这个很可能是实时活动，保持原生不创建。
