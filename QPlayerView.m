@@ -15,6 +15,70 @@
 
 
 
+static NSDictionary *QReadPreferenceDomain(NSString *domain) {
+    NSDictionary *saved = [NSDictionary dictionaryWithContentsOfFile:
+        [@"/var/mobile/Library/Preferences/" stringByAppendingFormat:@"%@.plist", domain]];
+    if ([saved isKindOfClass:NSDictionary.class]) return saved;
+    CFStringRef identifier = (__bridge CFStringRef)domain;
+    CFPreferencesAppSynchronize(identifier);
+    CFArrayRef keys = CFPreferencesCopyKeyList(identifier, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+    if (!keys) return @{};
+    CFDictionaryRef values = CFPreferencesCopyMultiple(keys, identifier, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+    CFRelease(keys);
+    return CFBridgingRelease(values) ?: @{};
+}
+
+NSDictionary *QReadPlayerSettings(void) {
+    NSDictionary *saved = QReadPreferenceDomain(@"com.gushi.quart17");
+    NSMutableDictionary *settings = [@{ @"masterEnabled": @YES, @"enabled": @YES,
+                    @"smallLockClock": @NO,
+                    @"smallLockClockFontSize": @23,
+                    @"playerEnabled": @YES, @"disableListScaling": @NO,
+                     @"scaleBanners": @NO,
+                    @"showNotificationCount": @YES,
+                    @"largeArtworkOffsetY": @0,
+                    @"clearAllEnabled": @YES, @"clearHapticEnabled": @YES,
+                    @"showProgress": @YES, @"backgroundProgress": @YES, @"hideRoute": @YES,
+                     @"hideControls": @NO,
+                    @"titleFromArtwork": @YES, @"artistFromArtwork": @YES,
+                    @"progressFromArtwork": @YES, @"backgroundFromArtwork": @YES } mutableCopy];
+    if ([saved isKindOfClass:NSDictionary.class]) [settings addEntriesFromDictionary:saved];
+    if (!settings[@"progressStyle"]) {
+        settings[@"progressStyle"] = [settings[@"backgroundProgress"] boolValue] ? @0 : @1;
+    }
+    NSDictionary *aura = QReadPreferenceDomain(@"com.gushi.aura");
+    settings[@"playerCornerRoundness"] = aura[@"playerCornerRoundness"] ?:
+        saved[@"playerCornerRoundness"] ?: (saved[@"roundArtwork"] && ![saved[@"roundArtwork"] boolValue] ? @0 : @1);
+    if (!settings[@"largeArtworkRoundness"])
+        settings[@"largeArtworkRoundness"] = saved[@"playerCornerRoundness"] ?: @1;
+    // MediaRemoteUI cannot reliably read the mobile user's preference domain.
+    if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.MediaRemoteUI"]) {
+        static int flagsToken = -1;
+        if (flagsToken < 0) notify_register_check("com.gushi.quart17/artworkflags", &flagsToken);
+        uint64_t flags = 0;
+        if (flagsToken >= 0 && notify_get_state(flagsToken, &flags) == NOTIFY_STATUS_OK &&
+            (flags & ~4095ULL) == 0x51710000ULL) {
+            settings[@"masterEnabled"] = @((flags & 1) != 0);
+            settings[@"playerEnabled"] = @((flags & 2) != 0);
+            settings[@"showProgress"] = @((flags & 4) != 0);
+            NSUInteger style = (flags >> 3) & 3;
+            if (style) settings[@"progressStyle"] = @(style - 1);
+            if (flags & (1ULL << 11)) {
+                NSArray *keys = @[@"hideControls", @"hideRoute", @"backgroundFromArtwork", @"titleFromArtwork", @"artistFromArtwork", @"progressFromArtwork"];
+                for (NSUInteger i = 0; i < keys.count; i++)
+                    settings[keys[i]] = @((flags & (1ULL << (i + 5))) != 0);
+            }
+        }
+        static int cornerToken = -1;
+        if (cornerToken < 0) notify_register_check("com.gushi.quart17/playercorner", &cornerToken);
+        uint64_t corner = 0;
+        if (cornerToken >= 0 && notify_get_state(cornerToken, &corner) == NOTIFY_STATUS_OK &&
+            (corner & 0xffff0000ULL) == 0x51700000ULL && (corner & 0xffffULL) <= 10000)
+            settings[@"playerCornerRoundness"] = @((corner & 0xffffULL) / 10000.0);
+    }
+    return [settings copy];
+}
+
 typedef void (^QInfoCompletion)(CFDictionaryRef);
 typedef void (^QPlayingCompletion)(Boolean);
 static void (*QGetInfo)(dispatch_queue_t, QInfoCompletion);
@@ -35,6 +99,12 @@ static void QPublishExpandedSeek(CGFloat fraction, BOOL dragging) {
         (uint64_t)llround(MIN(1, MAX(0, fraction)) * 1000000);
     notify_set_state(qExpandedSeekToken, value);
     notify_post("com.gushi.quart17/artworkseek");
+}
+
+static NSTimeInterval QMetadataTimestamp(id value) {
+    if ([value isKindOfClass:NSDate.class]) return [value timeIntervalSince1970];
+    if ([value isKindOfClass:NSNumber.class]) return [value doubleValue];
+    return 0;
 }
 
 static NSString *QKey(CFStringRef *symbol, NSString *fallback) {
@@ -238,7 +308,7 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 @property (nonatomic, strong) CAShapeLayer *artworkProgressTrack;
 @property (nonatomic, strong) CAShapeLayer *artworkProgressRing;
 @property (nonatomic, strong) UIView *artworkSeekArea;
-@property (nonatomic, strong) UIPanGestureRecognizer *expandedSeekPan;
+@property (nonatomic, strong) UIPanGestureRecognizer *progressPan;
 @property (nonatomic, strong) QMarqueeLabel *titleLabel;
 @property (nonatomic, strong) QMarqueeLabel *artistLabel;
 @property (nonatomic, strong) UILabel *elapsedLabel;
@@ -266,6 +336,7 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 @property (nonatomic, copy) NSData *artworkData;
 @property (nonatomic) BOOL hasValidNativeMetadata;
 @property (nonatomic, weak) UISlider *nativeSlider;
+@property (nonatomic, weak) id nativeTimeControls;
 @property (nonatomic, copy) NSString *trackIdentity;
 @property (nonatomic) BOOL suppressSiblingViews;
 @property (nonatomic) BOOL usesNativeMetadataFallback;
@@ -332,9 +403,9 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(nowPlayingChanged:)
             name:@"kMRMediaRemoteNowPlayingInfoDidChangeNotification" object:nil];
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(qSuspendRefresh:)
-            name:UIApplicationDidEnterBackgroundNotification object:nil];
+            name:UISceneDidEnterBackgroundNotification object:nil];
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(qResumeRefresh:)
-            name:UIApplicationWillEnterForegroundNotification object:nil];
+            name:UISceneWillEnterForegroundNotification object:nil];
 
         _backgroundProgress = [UIView new];
         _backgroundProgress.userInteractionEnabled = NO;
@@ -342,7 +413,6 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
         _backgroundSeekArea = [UIView new];
         _backgroundSeekArea.backgroundColor = UIColor.clearColor;
         [_backgroundSeekArea addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(seekTapped:)]];
-        [_backgroundSeekArea addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(seekPanned:)]];
         [self addSubview:_backgroundSeekArea];
 
         _artwork = [UIImageView new];
@@ -365,14 +435,11 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
         _artworkSeekArea.backgroundColor = UIColor.clearColor;
         _artworkSeekArea.hidden = YES;
         [_artworkSeekArea addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(artworkSeekTapped:)]];
-        [_artworkSeekArea addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(artworkSeekPanned:)]];
         [self addSubview:_artworkSeekArea];
 
-        _expandedSeekPan = [[UIPanGestureRecognizer alloc] initWithTarget:self
-                                                                   action:@selector(artworkSeekPanned:)];
-        _expandedSeekPan.cancelsTouchesInView = NO;
-        _expandedSeekPan.delegate = self;
-        [self addGestureRecognizer:_expandedSeekPan];
+        _progressPan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(seekPanned:)];
+        _progressPan.delegate = self;
+        [self addGestureRecognizer:_progressPan];
 
         _titleLabel = [QMarqueeLabel new];
         _titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
@@ -398,9 +465,8 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
         UITapGestureRecognizer *seekTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(seekTapped:)];
         [_progress addGestureRecognizer:seekTap];
         UIPanGestureRecognizer *seekPan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(seekPanned:)];
+        seekPan.delegate = self;
         [_progress addGestureRecognizer:seekPan];
-        [_progress addTarget:self action:@selector(scrubStarted:) forControlEvents:UIControlEventTouchDown];
-        [_progress addTarget:self action:@selector(scrubEnded:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
         [self addSubview:_progress];
 
         _elapsedLabel = [UILabel new];
@@ -451,6 +517,7 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 
 - (void)didMoveToWindow {
     [super didMoveToWindow];
+    self.refreshSuspended = self.window.windowScene.activationState == UISceneActivationStateBackground;
     [self updateAccent];
     [self qUpdateRefreshLifecycle];
     [self refresh];
@@ -470,11 +537,13 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 }
 
 - (void)qSuspendRefresh:(NSNotification *)notification {
+    if (notification.object != self.window.windowScene) return;
     self.refreshSuspended = YES;
     [self qUpdateRefreshLifecycle];
 }
 
 - (void)qResumeRefresh:(NSNotification *)notification {
+    if (notification.object != self.window.windowScene) return;
     self.refreshSuspended = NO;
     [self qUpdateRefreshLifecycle];
     [self refresh];
@@ -749,7 +818,7 @@ static NSTimeInterval QParseTime(NSString *text) {
             strongSelf.duration = reportedDuration;
         }
         NSTimeInterval elapsed = [info[QKey(QElapsedKey, @"kMRMediaRemoteNowPlayingInfoElapsedTime")] doubleValue];
-        NSTimeInterval timestamp = [info[QKey(QTimestampKey, @"kMRMediaRemoteNowPlayingInfoTimestamp")] doubleValue];
+        NSTimeInterval timestamp = QMetadataTimestamp(info[QKey(QTimestampKey, @"kMRMediaRemoteNowPlayingInfoTimestamp")]);
         double rate = [info[QKey(QRateKey, @"kMRMediaRemoteNowPlayingInfoPlaybackRate")] doubleValue];
         NSTimeInterval age = [NSDate date].timeIntervalSince1970 - timestamp;
         if (timestamp > 0 && rate > 0 && age >= 0 && age < 10) elapsed += age * rate;
@@ -854,6 +923,10 @@ static NSString *QTextInView(UIView *root) {
         }
     }
     if (timeHost) {
+        if ([timeHost respondsToSelector:@selector(timeControls)]) {
+            id controls = ((id (*)(id, SEL))objc_msgSend)(timeHost, @selector(timeControls));
+            self.nativeTimeControls = [controls respondsToSelector:@selector(setElapsedTime:)] ? controls : nil;
+        }
         if ([timeHost respondsToSelector:@selector(slider)]) {
             id value = ((id (*)(id, SEL))objc_msgSend)(timeHost, @selector(slider));
             if ([value isKindOfClass:UISlider.class]) self.nativeSlider = value;
@@ -931,6 +1004,19 @@ static NSString *QTextInView(UIView *root) {
 - (void)toggle:(id)sender { if (QSendCommand) QSendCommand(2, nil); [self refresh]; }
 - (void)next:(id)sender { if (QSendCommand) QSendCommand(4, nil); [self refresh]; }
 - (void)openPlayingApp:(id)sender {
+    UIView *host = self.superview;
+    id controller = host.nextResponder;
+    if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.MediaRemoteUI"] &&
+        [controller respondsToSelector:@selector(didSelectLabelView:)] &&
+        [host respondsToSelector:@selector(headerView)]) {
+        id header = ((id (*)(id, SEL))objc_msgSend)(host, @selector(headerView));
+        id label = [header respondsToSelector:@selector(labelView)]
+            ? ((id (*)(id, SEL))objc_msgSend)(header, @selector(labelView)) : nil;
+        if (label) {
+            ((void (*)(id, SEL, id))objc_msgSend)(controller, @selector(didSelectLabelView:), label);
+            return;
+        }
+    }
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          CFSTR("com.gushi.quart17/openplayingapp"), NULL, NULL, YES);
 }
@@ -938,8 +1024,13 @@ static NSString *QTextInView(UIView *root) {
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          CFSTR("com.gushi.quart17/togglenativeartwork"), NULL, NULL, YES);
 }
-- (void)scrubStarted:(id)sender { self.scrubbing = YES; }
+- (void)scrubStarted:(id)sender {
+    if (self.scrubbing) return;
+    self.scrubbing = YES;
+}
 - (void)seekTapped:(UITapGestureRecognizer *)gesture {
+    if (self.duration <= 0) return;
+    [self scrubStarted:gesture];
     UIView *area = gesture.view;
     CGPoint point = [gesture locationInView:area];
     self.progress.value = MIN(1, MAX(0, point.x / MAX(1, area.bounds.size.width)));
@@ -947,23 +1038,30 @@ static NSString *QTextInView(UIView *root) {
     [self scrubEnded:self.progress];
 }
 - (void)seekPanned:(UIPanGestureRecognizer *)gesture {
+    if (gesture.state == UIGestureRecognizerStateCancelled) {
+        self.scrubbing = NO;
+        [self updateVisualProgress];
+        if (self.expandedArtwork) QPublishExpandedSeek(self.progress.value, NO);
+        return;
+    }
     UIView *area = gesture.view;
     if (area == self.progress) {
         // 底部进度条：手指位置即进度（保持原交互）
         CGPoint point = [gesture locationInView:area];
         self.progress.value = MIN(1, MAX(0, point.x / MAX(1, area.bounds.size.width)));
         [self updateProgressFill];
-        if (gesture.state == UIGestureRecognizerStateBegan) self.scrubbing = YES;
-        if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        if (gesture.state == UIGestureRecognizerStateBegan) [self scrubStarted:gesture];
+        if (gesture.state == UIGestureRecognizerStateEnded) {
             [self scrubEnded:self.progress];
         }
         return;
     }
     // 背景进度：相对拖拽，拖动 0.6 倍播放器宽度走完全程
     if (gesture.state == UIGestureRecognizerStateBegan) {
-        self.scrubbing = YES;
+        [self scrubStarted:gesture];
         self.dragStartProgress = MIN(1, MAX(0, self.progress.value));
         self.dragStartX = [gesture translationInView:self].x;
+        if (self.expandedArtwork) QPublishExpandedSeek(self.progress.value, YES);
         return;
     }
     if (gesture.state == UIGestureRecognizerStateChanged) {
@@ -971,9 +1069,10 @@ static NSString *QTextInView(UIView *root) {
         self.progress.value = MIN(1, MAX(0, self.dragStartProgress +
                                          ([gesture translationInView:self].x - self.dragStartX) / span));
         [self updateProgressFill];
+        if (self.expandedArtwork) QPublishExpandedSeek(self.progress.value, YES);
         return;
     }
-    if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+    if (gesture.state == UIGestureRecognizerStateEnded) {
         [self scrubEnded:self.progress];
     }
 }
@@ -981,9 +1080,11 @@ static CGFloat QArtworkSeekFraction(UIView *area, CGPoint point) {
     return MIN(1, MAX(0, point.x / MAX(1, area.bounds.size.width)));
 }
 - (void)artworkSeekTapped:(UITapGestureRecognizer *)gesture {
+    if (self.duration <= 0) return;
     UIView *area = gesture.view;
     CGPoint point = [gesture locationInView:area];
     if (self.expandedArtwork) {
+        [self scrubStarted:gesture];
         self.progress.value = QArtworkSeekFraction(area, point);
         [self updateProgressFill];
         [self scrubEnded:self.progress];
@@ -996,70 +1097,50 @@ static CGFloat QArtworkSeekFraction(UIView *area, CGPoint point) {
         [self artworkTapped:area];
         return;
     }
+    [self scrubStarted:gesture];
     self.progress.value = QArtworkSeekFraction(area, point);
     [self updateProgressFill];
     [self scrubEnded:self.progress];
 }
-- (void)artworkSeekPanned:(UIPanGestureRecognizer *)gesture {
-    if (gesture.state != UIGestureRecognizerStateBegan &&
-        gesture.state != UIGestureRecognizerStateChanged &&
-        gesture.state != UIGestureRecognizerStateEnded &&
-        gesture.state != UIGestureRecognizerStateCancelled) return;
-    BOOL expandedSeek = gesture == self.expandedSeekPan && self.expandedArtwork;
-    // 封面进度：相对拖拽，拖动 0.6 倍播放器宽度走完全程
-    if (gesture.state == UIGestureRecognizerStateBegan) {
-        self.scrubbing = YES;
-        self.dragStartProgress = MIN(1, MAX(0, self.progress.value));
-        self.dragStartX = [gesture translationInView:self].x;
-        if (expandedSeek) QPublishExpandedSeek(self.progress.value, YES);
-        return;
-    }
-    if (gesture.state == UIGestureRecognizerStateChanged) {
-        CGFloat span = MAX(1, self.bounds.size.width * 0.6);
-        self.progress.value = MIN(1, MAX(0, self.dragStartProgress +
-                                         ([gesture translationInView:self].x - self.dragStartX) / span));
-        [self updateProgressFill];
-        if (expandedSeek) QPublishExpandedSeek(self.progress.value, YES);
-        return;
-    }
-    [self scrubEnded:self.progress];
-    if (expandedSeek) QPublishExpandedSeek(self.progress.value, NO);
-}
-
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
-    if (gesture != self.expandedSeekPan) return YES;
-    if (!self.expandedArtwork || self.duration <= 0 ||
+    if (self.duration <= 0 ||
         ![self.settings[@"showProgress"] boolValue]) return NO;
-    CGPoint point = [gesture locationInView:self];
-    if (!self.progress.hidden && CGRectContainsPoint(self.progress.frame, point)) return NO;
-    CGPoint velocity = [(UIPanGestureRecognizer *)gesture velocityInView:self];
-    return fabs(velocity.x) > fabs(velocity.y) * 1.25;
+    if (gesture == self.progressPan) {
+        if (!self.expandedArtwork && [self.settings[@"progressStyle"] integerValue] == 1) return NO;
+        UIView *target = [self hitTest:[gesture locationInView:self] withEvent:nil];
+        for (UIView *view = target; view && view != self; view = view.superview)
+            if ([view isKindOfClass:UIControl.class]) return NO;
+    }
+    CGPoint translation = [(UIPanGestureRecognizer *)gesture translationInView:self];
+    return fabs(translation.x) > fabs(translation.y) * 0.5;
 }
 
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gesture
-    shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGesture {
-    return gesture == self.expandedSeekPan && self.expandedArtwork;
+- (BOOL)acuis_wantsPriorityOverTargetOfGestureRecognizer:(UIGestureRecognizer *)gesture {
+    // Match MRUNowPlayingTimeControlsView's activity-scene touch routing.
+    return YES;
 }
+
 - (void)scrubEnded:(id)sender {
     self.scrubbing = NO;
     CGFloat fraction = MIN(1, MAX(0, self.progress.value));
     self.seekTarget = self.duration * fraction;
     self.seekHoldUntil = CFAbsoluteTimeGetCurrent() + 2.5;
-    if (QSetElapsed && self.duration > 0) QSetElapsed(fraction * self.duration);
-    UISlider *native = self.nativeSlider;
+    id native = self.nativeTimeControls;
     if (native) {
-        native.value = native.minimumValue + fraction * (native.maximumValue - native.minimumValue);
-        [native sendActionsForControlEvents:UIControlEventValueChanged];
-        [native sendActionsForControlEvents:UIControlEventTouchUpInside];
-    }
+        ((void (*)(id, SEL, double))objc_msgSend)(native, @selector(setElapsedTime:), self.seekTarget);
+    } else if (QSetElapsed && self.duration > 0) QSetElapsed(self.seekTarget);
+    NSLog(@"[Quart17] seek committed target=%.3f duration=%.3f native=%@", self.seekTarget, self.duration, [native class]);
     self.elapsed = self.duration * fraction;
     self.progressAnchorElapsed = self.elapsed;
     self.progressAnchorTime = CACurrentMediaTime();
     [self updateProgressFill];
+    if (self.expandedArtwork) QPublishExpandedSeek(fraction, NO);
     [self refresh];
 }
 
 - (void)updateProgressFill {
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
     CGFloat fraction = isfinite(self.progress.value) ? MIN(1, MAX(0, self.progress.value)) : 0;
     CGFloat scale = UIScreen.mainScreen.scale;
     CGFloat width = round(self.bounds.size.width * fraction * scale) / scale;
@@ -1067,8 +1148,6 @@ static CGFloat QArtworkSeekFraction(UIView *area, CGPoint point) {
     CGFloat roundness = self.settings[@"playerCornerRoundness"] ? [self.settings[@"playerCornerRoundness"] doubleValue] : 1;
     roundness = isfinite(roundness) ? MIN(1, MAX(0, roundness)) : 1;
     self.backgroundProgress.layer.cornerRadius = MIN(self.bounds.size.height * roundness / 2, width / 2);
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
     self.artworkProgressRing.strokeEnd = fraction;
     [CATransaction commit];
 }

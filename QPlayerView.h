@@ -9,3 +9,12 @@
 - (BOOL)containsArtworkAtPoint:(CGPoint)point;
 - (void)setExpandedArtwork:(BOOL)expanded;
 @end
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+NSDictionary *QReadPlayerSettings(void);
+void QInstallCompactPlayerHooks(void);
+#ifdef __cplusplus
+}
+#endif

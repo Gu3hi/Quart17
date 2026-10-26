@@ -134,6 +134,13 @@ static void QWritePref(NSString *key, id value) {
         uint64_t flags = 0x51710000ULL;
         for (NSUInteger i = 0; i < 3; i++)
             if ([settings[@[@"masterEnabled", @"playerEnabled", @"showProgress"][i]] ?: @YES boolValue]) flags |= 1ULL << i;
+        NSInteger style = settings[@"progressStyle"] ? [settings[@"progressStyle"] integerValue] :
+            ([settings[@"backgroundProgress"] ?: @YES boolValue] ? 0 : 1);
+        flags |= (uint64_t)(MIN(2, MAX(0, style)) + 1) << 3;
+        NSArray *keys = @[@"hideControls", @"hideRoute", @"backgroundFromArtwork", @"titleFromArtwork", @"artistFromArtwork", @"progressFromArtwork"];
+        for (NSUInteger i = 0; i < keys.count; i++)
+            if ([settings[keys[i]] ?: (i == 0 ? @NO : @YES) boolValue]) flags |= 1ULL << (i + 5);
+        flags |= 1ULL << 11; // Marks the extended settings as present, including all-false values.
         notify_set_state(flagsToken, flags);
         notify_cancel(flagsToken);
     }
@@ -553,6 +560,7 @@ static void QWritePref(NSString *key, id value) {
             @"缩放桌面横幅": @"Scale notification banners",
             @"通知外观": @"Notifications",
             @"通知计数": @"Notification count",
+            @"控制通知计数和通知缩放；关闭后恢复原生大小并隐藏计数。玻璃外观请到 Aura 设置。": @"Controls notification counts and scaling. Turn off to restore native sizes and hide counts. Glass appearance is in Aura.",
             @"锁屏手势": @"Lock Screen gestures",
             @"右侧双下滑清除": @"Double swipe down to clear",
             @"清除时轻震动": @"Light haptic on clear",

@@ -1,0 +1,32 @@
+{
+  "source": "iOS 17.3.1 SpringBoard live capture, 2026-10-26",
+  "width": 402,
+  "height": 167,
+  "ancestors": [
+    "NCNotificationListSupplementaryHostingView",
+    "UIView",
+    "NCNotificationListCell",
+    "NCNotificationListView",
+    "NCNotificationListView",
+    "NCNotificationListView",
+    "UIView",
+    "CSCoverSheetViewBase",
+    "CSMainPageView",
+    "CSScrollView",
+    "SBFTouchPassThroughView",
+    "CSCoverSheetView"
+  ],
+  "views": [
+    "CSActivityItemContentView",
+    "MTMaterialView",
+    "PLPlatterCustomContentView",
+    "PLPlatterView",
+    "UIView",
+    "_UIContextLayerHostView",
+    "_UISceneLayerHostContainerView",
+    "_UIScenePresentationView",
+    "_UITouchPassthroughView"
+  ],
+  "target_bundle": "com.apple.MediaRemoteUI",
+  "now_playing_application": null
+}

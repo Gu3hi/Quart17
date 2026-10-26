@@ -1,3 +1,4 @@
+#import "QPlayerView.h"
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
@@ -45,7 +46,7 @@ static int qArtworkFlagsToken = -1;
 static BOOL QArtworkFlag(NSUInteger bit, NSString *key) {
     uint64_t state = 0;
     if (qArtworkFlagsToken >= 0 && notify_get_state(qArtworkFlagsToken, &state) == NOTIFY_STATUS_OK &&
-        (state & ~7ULL) == 0x51710000ULL) return (state & (1ULL << bit)) != 0;
+        (state & ~4095ULL) == 0x51710000ULL) return (state & (1ULL << bit)) != 0;
     return [qArtworkSettings[key] ?: @YES boolValue];
 }
 
@@ -95,20 +96,6 @@ static void QRestoreNativeArtwork(UIView *view) {
 
 static id QInfoValue(NSDictionary *info, CFStringRef *key, NSString *fallback) {
     return info[key && *key ? (__bridge NSString *)*key : fallback];
-}
-
-static NSDictionary *QReadArtworkSettings(void) {
-    NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:
-        @"/var/mobile/Library/Preferences/com.gushi.quart17.plist"];
-    if (settings) return settings;
-    CFPreferencesAppSynchronize(CFSTR("com.gushi.quart17"));
-    CFArrayRef keys = CFPreferencesCopyKeyList(CFSTR("com.gushi.quart17"),
-        kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
-    if (!keys) return @{};
-    CFDictionaryRef values = CFPreferencesCopyMultiple(keys, CFSTR("com.gushi.quart17"),
-        kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
-    CFRelease(keys);
-    return CFBridgingRelease(values) ?: @{};
 }
 
 static CGFloat QArtworkRoundness(void) {
@@ -176,7 +163,7 @@ static void QApplyArtworkScale(UIView *image) {
         }
         if (!gotOffset) {
             // 直接读文件不依赖缓存，确保拿到持久化的值
-            shiftY = [QReadArtworkSettings()[@"largeArtworkOffsetY"] doubleValue];
+            shiftY = [QReadPlayerSettings()[@"largeArtworkOffsetY"] doubleValue];
         }
         shiftY = isfinite(shiftY) ? MAX(-200, MIN(200, shiftY)) : 0;
     }
@@ -568,7 +555,7 @@ static void QToggleNativeArtwork(CFNotificationCenterRef center, void *observer,
 static void QNativeArtworkChanged(CFNotificationCenterRef center, void *observer,
                                   CFStringRef name, const void *object, CFDictionaryRef info) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        qArtworkSettings = QReadArtworkSettings();
+        qArtworkSettings = QReadPlayerSettings();
         if (!QArtworkFlag(0, @"masterEnabled") || !QArtworkFlag(1, @"playerEnabled"))
             QSetNativeArtworkExpanded(NO);
         for (UIView *view in qArtworkViews.allObjects) QStyleNativeArtwork(view);
@@ -602,7 +589,7 @@ void QInstallNativeArtworkHooks(void) {
     notify_register_check("com.gushi.quart17/artworkseek", &qSeekStateToken);
     qArtworkTapObserver = [QNativeArtworkTapObserver new];
     qArtworkViews = [NSHashTable weakObjectsHashTable];
-    qArtworkSettings = QReadArtworkSettings();
+    qArtworkSettings = QReadPlayerSettings();
     qMediaRemote = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY);
     if (qMediaRemote) {
         qGetNowPlayingInfo = dlsym(qMediaRemote, "MRMediaRemoteGetNowPlayingInfo");

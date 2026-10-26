@@ -16,8 +16,6 @@
 static NSString *const QPrefs = @"com.gushi.quart17";
 static NSMutableDictionary *qSettings;
 static int qCornerStateToken = -1;
-static BOOL qNativeArtworkExpanded;
-static NSHashTable<QPlayerView *> *qActivePlayers;
 
 static NSHashTable<UIView *> *qActivePlatters;
 static NSHashTable<UIView *> *qActiveNotifications;
@@ -97,28 +95,7 @@ static void QRestyleLockClockForWidget(UIView *widget);
 
 
 static void QLoadSettings(void) {
-    NSDictionary *saved = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.gushi.quart17.plist"];
-    qSettings = [@{ @"masterEnabled": @YES, @"enabled": @YES,
-                    @"smallLockClock": @NO,
-                    @"smallLockClockFontSize": @23,
-                    @"playerEnabled": @YES, @"disableListScaling": @NO,
-                     @"scaleBanners": @NO,
-                    @"showNotificationCount": @YES,
-                    @"largeArtworkOffsetY": @0,
-                    @"clearAllEnabled": @YES, @"clearHapticEnabled": @YES,
-                    @"showProgress": @YES, @"backgroundProgress": @YES, @"hideRoute": @YES,
-                     @"hideControls": @NO,
-                    @"titleFromArtwork": @YES, @"artistFromArtwork": @YES,
-                    @"progressFromArtwork": @YES, @"backgroundFromArtwork": @YES } mutableCopy];
-    if ([saved isKindOfClass:NSDictionary.class]) [qSettings addEntriesFromDictionary:saved];
-    if (!qSettings[@"progressStyle"]) {
-        qSettings[@"progressStyle"] = [qSettings[@"backgroundProgress"] boolValue] ? @0 : @1;
-    }
-    NSDictionary *aura = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.gushi.aura.plist"];
-    qSettings[@"playerCornerRoundness"] = aura[@"playerCornerRoundness"] ?:
-        saved[@"playerCornerRoundness"] ?: (saved[@"roundArtwork"] && ![saved[@"roundArtwork"] boolValue] ? @0 : @1);
-    if (!qSettings[@"largeArtworkRoundness"])
-        qSettings[@"largeArtworkRoundness"] = saved[@"playerCornerRoundness"] ?: @1;
+    qSettings = [QReadPlayerSettings() mutableCopy];
     if (qCornerStateToken < 0)
         notify_register_check("com.gushi.quart17/playercorner", &qCornerStateToken);
     if (qCornerStateToken >= 0) {
@@ -132,6 +109,7 @@ static void QLoadSettings(void) {
         notify_set_state(qCornerStateToken, ((uint64_t)llround(expandedCorner * 10000) << 48) |
             ((uint64_t)llround(scale * 10000) << 32) |
             0x51700000ULL | (uint64_t)llround(corner * 10000));
+        notify_post("com.gushi.quart17/playercornerchanged");
     }
     int offsetToken = -1;
     if (notify_register_check("com.gushi.quart17/artworkoffset", &offsetToken) == NOTIFY_STATUS_OK) {
@@ -142,10 +120,15 @@ static void QLoadSettings(void) {
     }
     int flagsToken = -1;
     if (notify_register_check("com.gushi.quart17/artworkflags", &flagsToken) == NOTIFY_STATUS_OK) {
-        notify_set_state(flagsToken, 0x51710000ULL |
+        uint64_t flags = 0x51710000ULL |
             ([qSettings[@"masterEnabled"] boolValue] ? 1ULL : 0) |
             ([qSettings[@"playerEnabled"] boolValue] ? 2ULL : 0) |
-            ([qSettings[@"showProgress"] boolValue] ? 4ULL : 0));
+            ([qSettings[@"showProgress"] boolValue] ? 4ULL : 0) |
+            ((uint64_t)(MIN(2, MAX(0, [qSettings[@"progressStyle"] integerValue])) + 1) << 3);
+        NSArray *keys = @[@"hideControls", @"hideRoute", @"backgroundFromArtwork", @"titleFromArtwork", @"artistFromArtwork", @"progressFromArtwork"];
+        for (NSUInteger i = 0; i < keys.count; i++)
+            if ([qSettings[keys[i]] boolValue]) flags |= 1ULL << (i + 5);
+        notify_set_state(flagsToken, flags | (1ULL << 11));
         notify_cancel(flagsToken);
     }
 }
@@ -165,12 +148,6 @@ static void QChanged(CFNotificationCenterRef center, void *observer, CFStringRef
             for (UIView *list in qActiveLists.allObjects) QScheduleListScaling(list);
             for (UIView *banner in qActiveBanners.allObjects) QApplyBannerScaling(banner);
             return;
-        }
-        for (QPlayerView *player in qActivePlayers.allObjects) {
-            [player applySettings:qSettings];
-            [player refresh];
-            [player setNeedsLayout];
-            [player layoutIfNeeded];
         }
         for (UIView *platter in qActivePlatters.allObjects) {
             [platter setNeedsLayout];
@@ -261,18 +238,6 @@ static BOOL QIsLockScreenVisible(void) {
     return [manager respondsToSelector:@selector(isLockScreenVisible)] &&
            ((BOOL (*)(id, SEL))objc_msgSend)(manager, @selector(isLockScreenVisible));
 }
-
-static void QNativeArtworkVisibilityChanged(CFNotificationCenterRef center, void *observer,
-                                             CFStringRef name, const void *object,
-                                             CFDictionaryRef userInfo) {
-    BOOL expanded = CFEqual(name, CFSTR("com.gushi.quart17/nativeartworkexpanded"));
-    dispatch_async(dispatch_get_main_queue(), ^{
-        qNativeArtworkExpanded = expanded;
-        for (QPlayerView *player in qActivePlayers.allObjects)
-            [player setExpandedArtwork:expanded];
-    });
-}
-
 
 static BOOL QIsLockScreenNotification(UIView *view) {
     if (!view.window || ![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"] ||
@@ -698,7 +663,6 @@ static void QStyle(UIView *root) {
 
 @interface PLPlatterView : UIView
 @end
-static void *QSpringBoardPlayerKey = &QSpringBoardPlayerKey;
 extern "C" void QInstallNativeArtworkHooks(void);
 
 %group QNotifications
@@ -753,6 +717,7 @@ extern "C" void QInstallNativeArtworkHooks(void);
 
 static CGFloat QShrinkScale(void) {
     if (![qSettings[@"masterEnabled"] boolValue] ||
+        ![qSettings[@"enabled"] boolValue] ||
         [qSettings[@"disableListScaling"] boolValue]) return 1.0;
     id raw = qSettings[@"widthScale"];
     if (![raw isKindOfClass:NSNumber.class]) return 1.0;
@@ -1136,6 +1101,26 @@ static void QScheduleListScaling(UIView *list) {
 
 %end
 %end
+// Remote Now Playing and Live Activities share the same view containers.
+static BOOL QIsNowPlayingPlatter(UIView *platter) {
+    UIView *content = QFind(platter, @"CSActivityItemContentView");
+    if (!content) return NO;
+    BOOL hasLocalMedia = QFind(platter, @"MRUNowPlayingLabelView") ||
+                         QFind(platter, @"MRUNowPlayingTimeControlsView");
+    id identity = content.nextResponder;
+    SEL selectors[] = { @selector(activityHostViewController), @selector(activitySceneDescriptor),
+                        @selector(activityDescriptor), @selector(platterTargetBundleIdentifier) };
+    for (SEL selector : selectors) {
+        // Older local MRU hosts do not expose the ActivityUI descriptor chain.
+        if (![identity respondsToSelector:selector]) return hasLocalMedia;
+        identity = ((id (*)(id, SEL))objc_msgSend)(identity, selector);
+    }
+    return [identity isKindOfClass:NSString.class] &&
+           [identity isEqualToString:@"com.apple.MediaRemoteUI"];
+}
+
+static void *QPlayerChromeAlphaKey = &QPlayerChromeAlphaKey;
+
 %group QHostPlatter
 %hook PLPlatterView
 
@@ -1143,131 +1128,28 @@ static void QScheduleListScaling(UIView *list) {
     %orig;
     if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"]) return;
     CGSize size = self.bounds.size;
-    QPlayerView *player = objc_getAssociatedObject(self, QSpringBoardPlayerKey);
-    // 媒体播放器识别（2026-10-17 真机实测修正）：
-    // iOS 17 锁屏 Now Playing 的内容由远程场景宿主渲染（_UISceneLayerHostContainerView），
-    // 本地 MRUNowPlayingLabelView / MRUNowPlayingTimeControlsView 不一定存在，
-    // 不能只靠 MRU 做强信号；实测 Now Playing 高 137pt（通知 66~80pt），
-    // 故高度下限由 145 放宽到 120。远程场景容器也用于实时活动，
-    // 这里以 CSActivityItemContentView + 高度段 + NCNotificationListCell 三重限定，
-    // 每次布局都会重新验证，不会把通知误判为播放器。
-    // 2026-10-17 17:47 补充：实时活动虽也在 NCNotificationListCell 里，但不在
-    // NCNotificationListSupplementaryHostingView 容器内（Now Playing 专属），
-    // 加此祖先检查以排除落单的实时活动。
     BOOL mediaPlatter = size.width >= 340 && size.width <= 500 &&
                         size.height >= 120 && size.height <= 195 &&
                         QHasAncestor(self, @"NCNotificationListCell") &&
                         QHasAncestor(self, @"NCNotificationListSupplementaryHostingView") &&
-                        QFind(self, @"CSActivityItemContentView") &&
-                        (QFind(self, @"MRUNowPlayingLabelView") ||
-                         QFind(self, @"MRUNowPlayingTimeControlsView") ||
-                         QFind(self, @"_UISceneLayerHostContainerView"));
-    if (!mediaPlatter) {
-        if (player) {
-            [player removeFromSuperview];
-            [qActivePlayers removeObject:player];
-            [qActivePlatters removeObject:self];
-            objc_setAssociatedObject(self, QSpringBoardPlayerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            self.alpha = 1;
-            self.layer.opacity = 1;
+                        QIsNowPlayingPlatter(self);
+    BOOL hideChrome = mediaPlatter && [qSettings[@"masterEnabled"] boolValue] &&
+                      [qSettings[@"playerEnabled"] boolValue];
+    if (mediaPlatter) [qActivePlatters addObject:self];
+    // The remote content stays visible; only SpringBoard's native platter material is suppressed.
+    for (UIView *view in self.subviews) {
+        if (![NSStringFromClass(view.class) isEqualToString:@"MTMaterialView"]) continue;
+        NSNumber *original = objc_getAssociatedObject(view, QPlayerChromeAlphaKey);
+        if (hideChrome) {
+            if (!original) objc_setAssociatedObject(view, QPlayerChromeAlphaKey,
+                @(view.alpha), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            view.alpha = 0;
+        } else if (original) {
+            view.alpha = original.doubleValue;
+            objc_setAssociatedObject(view, QPlayerChromeAlphaKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
-        return;
     }
-    BOOL enabled = [qSettings[@"masterEnabled"] boolValue] && [qSettings[@"playerEnabled"] boolValue];
-    if (!enabled) {
-        self.alpha = 1;
-        self.layer.opacity = 1;
-        player.hidden = YES;
-        return;
-    }
-    UIView *container = self.superview;
-    if (!container) return;
-    if (!player) {
-        // 2026-10-17 18:05：无媒体会话时不建播放器。落单的实时活动在无音乐时
-        // 满足全部结构条件会被误判；SBMediaController.nowPlayingApplication 为空
-        // 说明系统没有 Now Playing，直接返回保持原生。
-        Class mediaClass = objc_getClass("SBMediaController");
-        id media = [mediaClass respondsToSelector:@selector(sharedInstance)]
-            ? ((id (*)(id, SEL))objc_msgSend)(mediaClass, @selector(sharedInstance)) : nil;
-        id playingApp = [media respondsToSelector:@selector(nowPlayingApplication)]
-            ? ((id (*)(id, SEL))objc_msgSend)(media, @selector(nowPlayingApplication)) : nil;
-        if (!playingApp) return;
-        // 只允许最顶部的媒体 platter 拥有 QPlayerView（2026-10-17 实时活动误判修复）：
-        // 锁屏上 Now Playing 始终在最上方，实时活动在下方。若已有 player 属于
-        // 位置更高的 platter，则当前这个很可能是实时活动，保持原生不创建。
-        // 反之若当前 platter 更高，则移除旧 player，把位置让给当前。
-        UIWindow *win = self.window;
-        if (win) {
-            CGFloat thisY = [self convertRect:self.bounds toView:win].origin.y;
-            BOOL shouldCreate = YES;
-            for (UIView *otherPlatter in [[qActivePlatters allObjects] copy]) {
-                if (otherPlatter == self) continue;
-                UIWindow *otherWin = otherPlatter.window;
-                if (!otherWin) continue;
-                CGFloat otherY = [otherPlatter convertRect:otherPlatter.bounds toView:otherWin].origin.y;
-                if (otherY < thisY - 1) {
-                    shouldCreate = NO;
-                    break;
-                } else {
-                    QPlayerView *oldPlayer = objc_getAssociatedObject(otherPlatter, QSpringBoardPlayerKey);
-                    if (oldPlayer) {
-                        [oldPlayer removeFromSuperview];
-                        [qActivePlayers removeObject:oldPlayer];
-                    }
-                    [qActivePlatters removeObject:otherPlatter];
-                    objc_setAssociatedObject(otherPlatter, QSpringBoardPlayerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                    otherPlatter.alpha = 1;
-                    otherPlatter.layer.opacity = 1;
-                }
-            }
-            if (!shouldCreate) return;
-        } else if (qActivePlayers.count > 0) {
-            // 取不到 window 时退化为“先到先得”，避免重复创建。
-            return;
-        }
-        player = [[QPlayerView alloc] initWithFrame:CGRectZero];
-        [player setSuppressSiblingViews:NO];
-        [player setUsesNativeMetadataFallback:NO];
-        objc_setAssociatedObject(self, QSpringBoardPlayerKey, player, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [qActivePlayers addObject:player];
-        [qActivePlatters addObject:self];
-        [player setExpandedArtwork:qNativeArtworkExpanded];
-    }
-    for (UIView *sibling in [container.subviews copy]) {
-        if (sibling != player && [sibling isKindOfClass:QPlayerView.class]) [sibling removeFromSuperview];
-    }
-    if (player.superview != container) [container addSubview:player];
-    // 播放器不再单独缩放：它位于 cell 的 contentView 之内，随 contentView 的
-    // transform 一起等比缩小。若这里再乘一次 s 会得到 s²（78% 会变成约 61%）。
-    // 内部度量由 QPlayerView 的 sizeFactor 按自身 bounds 推出，bounds 未受
-    // transform 影响，因此内部仍按设计尺寸布局，再整体被 transform 缩下去。
-    UIView *cell = self;
-    while (cell && ![NSStringFromClass(cell.class) isEqualToString:@"NCNotificationListCell"])
-        cell = cell.superview;
-    CGRect safeRect = cell ? [cell convertRect:cell.bounds toView:container] : container.bounds;
-    CGFloat height = MIN(88, MAX(50, safeRect.size.height - 8));
-    // The native activity cell is taller than the compact player. Keep the
-    // player inside that cell, but halve the empty space below it so the next
-    // notification visually sits closer without changing list geometry.
-    CGRect frame = [self convertRect:CGRectMake(0, (size.height - height) * 0.75,
-                                               size.width, height) toView:container];
-    if (!CGRectIsEmpty(safeRect)) {
-        frame.origin.y = MIN(frame.origin.y, CGRectGetMaxY(safeRect) - frame.size.height - 4);
-        frame.origin.y = MAX(frame.origin.y, CGRectGetMinY(safeRect) + 4);
-    }
-    CGFloat scale = UIScreen.mainScreen.scale;
-    player.frame = CGRectMake(round(frame.origin.x * scale) / scale,
-                              round(frame.origin.y * scale) / scale,
-                              round(frame.size.width * scale) / scale,
-                              round(frame.size.height * scale) / scale);
-    [player applySettings:qSettings];
-    [player seedFromNativePlayer:self];
-    [container bringSubviewToFront:player];
-    player.hidden = NO;
-    // CALayer opacity hides the original platter visually while UIView alpha
-    // stays at 1, so UIKit can still deliver artwork taps to its native view.
-    self.alpha = 1;
-    self.layer.opacity = 0;
+
 }
 
 %end
@@ -1542,9 +1424,9 @@ static void QRestyleLockClockForWidget(UIView *widget) {
     @autoreleasepool {
         if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.MediaRemoteUI"]) {
             QInstallNativeArtworkHooks();
+            QInstallCompactPlayerHooks();
             return;
         }
-        qActivePlayers = [NSHashTable weakObjectsHashTable];
         qActivePlatters = [NSHashTable weakObjectsHashTable];
         qActiveNotifications = [NSHashTable weakObjectsHashTable];
         qActiveLists = [NSHashTable weakObjectsHashTable];
@@ -1564,14 +1446,6 @@ static void QRestyleLockClockForWidget(UIView *widget) {
                     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                         CFSTR("com.gushi.quart17/preferenceschanged"), NULL, NULL, YES);
                 }];
-            CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
-                                            QNativeArtworkVisibilityChanged,
-                                            CFSTR("com.gushi.quart17/nativeartworkexpanded"), NULL,
-                                            CFNotificationSuspensionBehaviorDeliverImmediately);
-            CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
-                                            QNativeArtworkVisibilityChanged,
-                                            CFSTR("com.gushi.quart17/nativeartworkcollapsed"), NULL,
-                                            CFNotificationSuspensionBehaviorDeliverImmediately);
             CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
                                             QOpenPlayingApp, CFSTR("com.gushi.quart17/openplayingapp"),
                                             NULL, CFNotificationSuspensionBehaviorDeliverImmediately);

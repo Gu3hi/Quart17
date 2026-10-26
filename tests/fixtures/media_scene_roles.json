@@ -1,0 +1,18 @@
+{
+  "ActivityUIServices.ActivityListItemSceneSpecification": {
+    "role": "ActivitySceneSessionRoleListItem",
+    "sceneClass": "ActivityUIServices.ActivityScene"
+  },
+  "ActivityUIServices.ActivitySystemApertureSceneSpecification": {
+    "role": "ActivitySceneSessionRoleSystemAperture",
+    "sceneClass": "ActivityUIServices.ActivityScene"
+  },
+  "ActivityUIServices.ActivityAmbientSceneSpecification": {
+    "role": "ActivitySceneSessionRoleAmbient",
+    "sceneClass": "ActivityUIServices.ActivityScene"
+  },
+  "ActivityUIServices.ActivityBannerSceneSpecification": {
+    "role": "ActivitySceneSessionRoleBanner",
+    "sceneClass": "ActivityUIServices.ActivityScene"
+  }
+}

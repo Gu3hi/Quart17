@@ -8,7 +8,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>调整通知卡片的文字和图标；锁屏通知固定使用深色外观以避免折叠黑块。</string>
+			<string>控制通知计数和通知缩放；关闭后恢复原生大小并隐藏计数。玻璃外观请到 Aura 设置。</string>
 			<key>label</key>
 			<string>通知样式</string>
 		</dict>

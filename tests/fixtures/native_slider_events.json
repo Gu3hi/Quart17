@@ -1,0 +1,13 @@
+{
+  "device_os": "17.3.1",
+  "slider_class": "MRUSlider",
+  "target_class": "MRUNowPlayingTimeControlsView",
+  "native_commit_target": "MRUTimeControls",
+  "native_commit_selector": "setElapsedTime:",
+  "activity_scene_gesture_priority": true,
+  "UIControlEventTouchDown": "sliderTouchDown:",
+  "UIControlEventValueChanged": "sliderValueChanged:",
+  "UIControlEventTouchUpInside": "sliderValueChanged:",
+  "UIControlEventTouchUpOutside": "sliderValueChanged:",
+  "UIControlEventTouchCancel": ["sliderValueChanged:", "sliderTouchCancel:"]
+}
