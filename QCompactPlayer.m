@@ -55,7 +55,7 @@ static void QLayoutCompactHost(UIView *host) {
     }
     CGFloat height = MIN(88, MAX(0, host.bounds.size.height - 8));
     player.frame = CGRectMake(CGRectGetMinX(host.bounds),
-        CGRectGetMinY(host.bounds) + (host.bounds.size.height - height) * 0.75,
+        CGRectGetMinY(host.bounds) + (host.bounds.size.height - height) * 0.5,
         host.bounds.size.width, height);
     [player applySettings:qCompactSettings];
     [player seedFromNativePlayer:host];

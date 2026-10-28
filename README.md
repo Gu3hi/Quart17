@@ -45,8 +45,8 @@ Quart17 brings a brand-new lock screen music player and notification experience 
 
 ## 安装要求 / Requirements
 
-- 当前 2.7.112 构建最低系统为 iOS 17；旧版 iOS 16 兼容记录不代表本版支持。
-- Version 2.7.112 requires iOS 17. Historical iOS 16 compatibility does not apply to this release.
+- 当前 2.8 构建最低系统为 iOS 17；旧版 iOS 16 兼容记录不代表本版支持。
+- Version 2.8 requires iOS 17. Historical iOS 16 compatibility does not apply to this release.
 - 越狱环境：Dopamine 2.x / RootHide（主要测试环境为 Relaxin 越狱 + RootHide）
 - Jailbreak: Dopamine 2.x / RootHide (primarily tested on Relaxin jailbreak + RootHide)
 - 架构：arm64 / arm64e
@@ -87,6 +87,10 @@ After installation, find Quart17 in Settings to configure:
 **Do not install two versions that both render glass** — they will conflict. Quart17 after the 2.1 baseline has removed all glass code.
 
 ## 版本历史 / Changelog
+
+### 2.8 · 2026-10-28
+- 调整锁屏紧凑播放器居中布局，并放宽媒体宿主背景的尺寸限制。此版本尚待真机验证。
+- Center the compact lock-screen player and remove fixed-size limits from media host background detection. Device validation is pending.
 
 ### 2.7.112 · 2026-10-26
 - 紧凑播放器移至 MediaRemoteUI 的通知列表场景，按媒体身份识别宿主，避免覆盖普通实时活动。

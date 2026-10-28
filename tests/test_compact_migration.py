@@ -53,6 +53,7 @@ for native_height in (0, 8, 40, 88, 137, 167, 195):
     actual = [eval(part, {"__builtins__": {}}, values) for part in frame]
     assert 0 <= actual[3] <= 88 and actual[1] >= 0
     assert actual[1] + actual[3] <= native_height
+    assert abs(actual[1] - (native_height - height) / 2) < 1e-9
 
 layout = compact.split("static void QCompactLayout(", 1)[1].split("static void (*qCompactOriginalDidMove)", 1)[0]
 assert "QRestoreCompactContent(host)" not in layout

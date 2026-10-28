@@ -52,8 +52,8 @@ assert not classify(activity, descriptor=False)
 for signal in ("MRUNowPlayingLabelView", "MRUNowPlayingTimeControlsView"):
     media = activity | {signal}
     assert classify(media, descriptor=False), "Retain local MRU compatibility"
-    assert not classify(media, descriptor=False, height=100)
-    assert not classify(media, descriptor=False, width=300)
+    assert classify(media, descriptor=False, height=100)
+    assert classify(media, descriptor=False, width=300)
     assert not classify(media, descriptor=False, ancestors=("OtherCell",))
 assert not classify({"MRUNowPlayingLabelView"}, descriptor=False)
 assert "nowPlayingApplication" not in hook

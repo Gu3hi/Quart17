@@ -1127,10 +1127,7 @@ static void *QPlayerChromeAlphaKey = &QPlayerChromeAlphaKey;
 - (void)layoutSubviews {
     %orig;
     if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"]) return;
-    CGSize size = self.bounds.size;
-    BOOL mediaPlatter = size.width >= 340 && size.width <= 500 &&
-                        size.height >= 120 && size.height <= 195 &&
-                        QHasAncestor(self, @"NCNotificationListCell") &&
+    BOOL mediaPlatter = QHasAncestor(self, @"NCNotificationListCell") &&
                         QHasAncestor(self, @"NCNotificationListSupplementaryHostingView") &&
                         QIsNowPlayingPlatter(self);
     BOOL hideChrome = mediaPlatter && [qSettings[@"masterEnabled"] boolValue] &&
