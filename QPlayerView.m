@@ -28,6 +28,53 @@ static NSDictionary *QReadPreferenceDomain(NSString *domain) {
     return CFBridgingRelease(values) ?: @{};
 }
 
+// Vela icon themes: Quart17 shows the same media.previous / media.play / media.next artwork as Vela.
+static NSString *QVelaThemeRoot(void) {
+#ifdef Q_ROOTHIDE
+    return jbroot(@"/Library/Themes/Vela");
+#else
+    return @"/var/mobile/Library/Theme/Vela";
+#endif
+}
+
+static BOOL QVelaComponent(id name) {
+    return [name isKindOfClass:NSString.class] && [name length] > 0 && [name length] <= 255 &&
+        ![name isEqualToString:@"."] && ![name isEqualToString:@".."] &&
+        [name rangeOfString:@"/"].location == NSNotFound && [name rangeOfString:@"\\"].location == NSNotFound &&
+        [name rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location == NSNotFound;
+}
+
+static NSString *QVelaThemeFolderNamed(NSString *name) {
+    if (!QVelaComponent(name) || [name hasPrefix:@"."]) return nil;
+    NSString *folder = [QVelaThemeRoot() stringByAppendingPathComponent:name];
+    BOOL directory = NO;
+    return [NSFileManager.defaultManager fileExistsAtPath:folder isDirectory:&directory] && directory ? folder : nil;
+}
+
+// Same rule as Vela's PIconUsesTheme/PIconReadTheme: only folder themes, and "system" turns them off.
+static NSString *QVelaThemeFolder(NSDictionary *vela) {
+    id identifier = vela[@"iconTheme"];
+    if ([vela[@"iconSource"] isEqual:@"system"] || ![identifier isKindOfClass:NSString.class] ||
+        ![identifier hasPrefix:@"folder:"]) return nil;
+    return QVelaThemeFolderNamed([identifier substringFromIndex:7]);
+}
+
+uint32_t QVelaThemeHash(NSString *folder) {
+    // FNV-1a of the theme folder name; MediaRemoteUI matches it against the theme directory.
+    uint32_t hash = 2166136261u;
+    for (const unsigned char *c = (const unsigned char *)folder.lastPathComponent.UTF8String; c && *c; c++)
+        hash = (hash ^ *c) * 16777619u;
+    return hash;
+}
+
+static NSString *QVelaThemeFolderForHash(uint32_t hash) {
+    for (NSString *name in [NSFileManager.defaultManager contentsOfDirectoryAtPath:QVelaThemeRoot() error:nil]) {
+        NSString *folder = QVelaThemeFolderNamed(name);
+        if (folder && QVelaThemeHash(folder) == hash) return folder;
+    }
+    return nil;
+}
+
 NSDictionary *QReadPlayerSettings(void) {
     NSDictionary *saved = QReadPreferenceDomain(@"com.gushi.quart17");
     NSMutableDictionary *settings = [@{ @"masterEnabled": @YES, @"enabled": @YES,
@@ -36,10 +83,11 @@ NSDictionary *QReadPlayerSettings(void) {
                     @"playerEnabled": @YES, @"disableListScaling": @NO,
                      @"scaleBanners": @NO,
                     @"showNotificationCount": @YES, @"notificationsFromTop": @NO,
+                    @"playerBorderEnabled": @NO, @"playerBorderWidth": @1.5,
                     @"largeArtworkOffsetY": @0,
                     @"clearAllEnabled": @YES, @"clearHapticEnabled": @YES,
                     @"showProgress": @YES, @"backgroundProgress": @YES, @"hideRoute": @YES,
-                     @"hideControls": @NO,
+                     @"hideControls": @NO, @"customControlIcons": @NO,
                     @"titleFromArtwork": @YES, @"artistFromArtwork": @YES,
                     @"progressFromArtwork": @YES, @"backgroundFromArtwork": @YES } mutableCopy];
     if ([saved isKindOfClass:NSDictionary.class]) [settings addEntriesFromDictionary:saved];
@@ -47,10 +95,15 @@ NSDictionary *QReadPlayerSettings(void) {
         settings[@"progressStyle"] = [settings[@"backgroundProgress"] boolValue] ? @0 : @1;
     }
     NSDictionary *aura = QReadPreferenceDomain(@"com.gushi.aura");
-    settings[@"playerCornerRoundness"] = aura[@"playerCornerRoundness"] ?:
-        saved[@"playerCornerRoundness"] ?: (saved[@"roundArtwork"] && ![saved[@"roundArtwork"] boolValue] ? @0 : @1);
+    // Quart17 owns the player corner; Aura's former value is only a migration fallback.
+    settings[@"playerCornerRoundness"] = saved[@"playerCornerRoundness"] ?: aura[@"playerCornerRoundness"] ?:
+        (saved[@"roundArtwork"] && ![saved[@"roundArtwork"] boolValue] ? @0 : @1);
     if (!settings[@"largeArtworkRoundness"])
-        settings[@"largeArtworkRoundness"] = saved[@"playerCornerRoundness"] ?: @1;
+        settings[@"largeArtworkRoundness"] = settings[@"playerCornerRoundness"];
+    // Aura's player glass replaces the panel surface; the border is only drawn while it is off.
+    settings[@"auraPlayerGlass"] = @([aura[@"masterEnabled"] ?: @YES boolValue] && [aura[@"playerGlass"] boolValue]);
+    NSString *velaTheme = QVelaThemeFolder(QReadPreferenceDomain(@"com.gushi.vela"));
+    if (velaTheme) settings[@"velaThemeFolder"] = velaTheme;
     // MediaRemoteUI cannot reliably read the mobile user's preference domain.
     if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.MediaRemoteUI"]) {
         static int flagsToken = -1;
@@ -75,8 +128,99 @@ NSDictionary *QReadPlayerSettings(void) {
         if (cornerToken >= 0 && notify_get_state(cornerToken, &corner) == NOTIFY_STATUS_OK &&
             (corner & 0xffff0000ULL) == 0x51700000ULL && (corner & 0xffffULL) <= 10000)
             settings[@"playerCornerRoundness"] = @((corner & 0xffffULL) / 10000.0);
+        // Border: bit 15 = enabled, low bits = width in hundredths of a point.
+        static int borderToken = -1;
+        if (borderToken < 0) notify_register_check("com.gushi.quart17/playerborder", &borderToken);
+        uint64_t border = 0;
+        if (borderToken >= 0 && notify_get_state(borderToken, &border) == NOTIFY_STATUS_OK &&
+            (border & 0xffff0000ULL) == 0x51720000ULL) {
+            settings[@"playerBorderEnabled"] = @((border & 0x8000ULL) != 0);
+            settings[@"playerBorderWidth"] = @((border & 0x7fffULL) / 100.0);
+        }
+        // Aura publishes its component switches here (bit 0 master, bit 7 player glass).
+        static int auraToken = -1;
+        if (auraToken < 0) notify_register_check("com.gushi.aura/components", &auraToken);
+        uint64_t auraState = 0;
+        if (auraToken >= 0 && notify_get_state(auraToken, &auraState) == NOTIFY_STATUS_OK &&
+            (auraState & 0xffff0000ULL) == 0x51430000ULL)
+            settings[@"auraPlayerGlass"] = @((auraState & 1ULL) && (auraState & (1ULL << 7)));
+        // SpringBoard publishes Vela's theme: tag 0x5173 in the top 16 bits, bit 32 = theme on, low 32 = name hash,
+        // bit 33 = Quart17's own static icons are switched on.
+        static int velaToken = -1;
+        if (velaToken < 0) notify_register_check("com.gushi.quart17/velatheme", &velaToken);
+        uint64_t vela = 0;
+        if (velaToken >= 0 && notify_get_state(velaToken, &vela) == NOTIFY_STATUS_OK && (vela >> 48) == 0x5173ULL) {
+            NSString *folder = (vela & (1ULL << 32)) ? QVelaThemeFolderForHash((uint32_t)vela) : nil;
+            if (folder) settings[@"velaThemeFolder"] = folder;
+            else [settings removeObjectForKey:@"velaThemeFolder"];
+            settings[@"customControlIcons"] = @((vela & (1ULL << 33)) != 0);
+        }
     }
     return [settings copy];
+}
+
+NSString *QCornerCurveForRoundness(CGFloat roundness) {
+    return isfinite(roundness) && roundness >= 0.999 ? kCACornerCurveCircular : kCACornerCurveContinuous;
+}
+
+CGPathRef QCreateRoundedRingPath(CGRect rect, CGFloat radius, CGFloat roundness) {
+    CGFloat left = CGRectGetMinX(rect), right = CGRectGetMaxX(rect);
+    CGFloat top = CGRectGetMinY(rect), bottom = CGRectGetMaxY(rect), midX = CGRectGetMidX(rect);
+    radius = MAX(0, MIN(radius, MIN(rect.size.width, rect.size.height) / 2));
+    if (radius > 0 && [QCornerCurveForRoundness(roundness) isEqualToString:kCACornerCurveContinuous]) {
+        // UIKit's rounded rect is Apple's continuous outline but starts near the top-left corner.
+        // Re-start it at the top centre so a ring's strokeEnd grows clockwise from 12 o'clock.
+        CGPathRef source = [UIBezierPath bezierPathWithRoundedRect:rect cornerRadius:radius].CGPath;
+        CGMutablePathRef path = CGPathCreateMutable();
+        __block BOOL started = NO, valid = YES, closed = NO;
+        CGPathApplyWithBlock(source, ^(const CGPathElement *element) {
+            const CGPoint *p = element->points;
+            switch (element->type) {
+                case kCGPathElementMoveToPoint:
+                    if (started || fabs(p[0].y - top) > 0.01 || p[0].x > midX + 0.01) valid = NO;
+                    started = YES;
+                    CGPathMoveToPoint(path, NULL, midX, top);
+                    break;
+                case kCGPathElementAddLineToPoint:
+                    CGPathAddLineToPoint(path, NULL, p[0].x, p[0].y);
+                    break;
+                case kCGPathElementAddQuadCurveToPoint:
+                    CGPathAddQuadCurveToPoint(path, NULL, p[0].x, p[0].y, p[1].x, p[1].y);
+                    break;
+                case kCGPathElementAddCurveToPoint:
+                    CGPathAddCurveToPoint(path, NULL, p[0].x, p[0].y, p[1].x, p[1].y, p[2].x, p[2].y);
+                    break;
+                case kCGPathElementCloseSubpath:
+                    if (closed) valid = NO;
+                    closed = YES;
+                    CGPathAddLineToPoint(path, NULL, midX, top);
+                    CGPathCloseSubpath(path);
+                    break;
+            }
+        });
+        if (valid && started) {
+            if (!closed) {
+                CGPathAddLineToPoint(path, NULL, midX, top);
+                CGPathCloseSubpath(path);
+            }
+            return path;
+        }
+        CGPathRelease(path);
+        return CGPathCreateCopy(source);
+    }
+    // Circular corners: begin at twelve o'clock and follow the edge clockwise.
+    CGMutablePathRef path = CGPathCreateMutable();
+    CGPathMoveToPoint(path, NULL, midX, top);
+    CGPathAddLineToPoint(path, NULL, right - radius, top);
+    if (radius > 0) CGPathAddArcToPoint(path, NULL, right, top, right, top + radius, radius);
+    CGPathAddLineToPoint(path, NULL, right, bottom - radius);
+    if (radius > 0) CGPathAddArcToPoint(path, NULL, right, bottom, right - radius, bottom, radius);
+    CGPathAddLineToPoint(path, NULL, left + radius, bottom);
+    if (radius > 0) CGPathAddArcToPoint(path, NULL, left, bottom, left, bottom - radius, radius);
+    CGPathAddLineToPoint(path, NULL, left, top + radius);
+    if (radius > 0) CGPathAddArcToPoint(path, NULL, left, top, left + radius, top, radius);
+    CGPathCloseSubpath(path);
+    return path;
 }
 
 typedef void (^QInfoCompletion)(CFDictionaryRef);
@@ -106,6 +250,8 @@ static NSTimeInterval QMetadataTimestamp(id value) {
     if ([value isKindOfClass:NSNumber.class]) return [value doubleValue];
     return 0;
 }
+
+static CGFloat QPlayerBorderWidth(NSDictionary *settings);
 
 static NSString *QKey(CFStringRef *symbol, NSString *fallback) {
     return symbol && *symbol ? (__bridge NSString *)*symbol : fallback;
@@ -216,88 +362,278 @@ static BOOL QLoadMediaRemote(void) {
 
 @end
 
-static UIImage *QButtonArtwork(NSString *name, CGFloat size) {
-    NSString *directory = QJbroot(@"/Library/Application Support/Quart17/Buttons");
-    NSString *path = [directory stringByAppendingPathComponent:[name stringByAppendingPathExtension:@"png"]];
-    UIImage *image = [UIImage imageWithContentsOfFile:path];
-    if (!image) return nil;
-    UIGraphicsBeginImageContextWithOptions(CGSizeMake(size, size), NO, 0);
-    [image drawInRect:CGRectMake(0, 0, size, size)];
-    UIImage *scaled = UIGraphicsGetImageFromCurrentImageContext();
-    UIGraphicsEndImageContext();
-    return [scaled imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+static NSString *QVelaResource(NSString *root, id relative) {
+    if (![root isKindOfClass:NSString.class] || !root.length || ![relative isKindOfClass:NSString.class] ||
+        ![relative length] || [relative isAbsolutePath]) return nil;
+    for (NSString *part in [relative pathComponents]) if (!QVelaComponent(part)) return nil;
+    NSString *base = root.stringByStandardizingPath.stringByResolvingSymlinksInPath;
+    NSString *path = [base stringByAppendingPathComponent:relative].stringByResolvingSymlinksInPath;
+    if (![path hasPrefix:[base stringByAppendingString:@"/"]]) return nil;
+    return [NSFileManager.defaultManager fileExistsAtPath:path] ? path : nil;
 }
 
-typedef NS_ENUM(NSInteger, QOutlineKind) {
-    QOutlineKindLeft,
-    QOutlineKindRight,
-    QOutlineKindSquare,
-    QOutlineKindCircle
-};
+static NSDictionary *QVelaSafePlist(NSString *path) {
+    if (!path) return nil;
+    if ([NSFileManager.defaultManager attributesOfItemAtPath:path error:nil].fileSize > 1048576) return nil;
+    id plist = [NSDictionary dictionaryWithContentsOfFile:path];
+    return [plist isKindOfClass:NSDictionary.class] ? plist : nil;
+}
 
-@interface QOutlineButton : UIButton
-@property (nonatomic) QOutlineKind outlineKind;
+// Names the vendored Vela host expects.
+static inline NSString *PFResource(NSString *root, id relative) { return QVelaResource(root, relative); }
+static inline NSDictionary *PFSafePlist(NSString *path) { return QVelaSafePlist(path); }
+#import "VelaCAIconHost.h"
+
+static NSString *QVelaPNG(NSString *root, id stem) {
+    if (![stem isKindOfClass:NSString.class] || ![stem length]) return nil;
+    if ([[stem pathExtension].lowercaseString isEqualToString:@"png"]) return QVelaResource(root, stem);
+    for (NSString *suffix in @[@"@3x.png", @"@2x.png", @".png"]) {
+        NSString *path = QVelaResource(root, [stem stringByAppendingString:suffix]);
+        if (path) return path;
+    }
+    return nil;
+}
+
+static NSDictionary *QVelaMapping(NSString *root, NSString *key) {
+    NSDictionary *manifest = QVelaSafePlist(QVelaResource(root, @"VelaTheme.plist")) ?:
+        QVelaSafePlist(QVelaResource(root, @"PrysmTheme.plist"));
+    id icons = manifest[@"Icons"];
+    id mapping = [icons isKindOfClass:NSDictionary.class] ? icons[key] : nil;
+    return [mapping isKindOfClass:NSDictionary.class] ? mapping : nil;
+}
+
+static BOOL QVelaPackage(NSString *path) {
+    return [path.pathExtension isEqualToString:@"ca"] && QVelaResource(path, @"main.caml") != nil;
+}
+
+// Where the art for one Quart17 button comes from. With "custom playback icons" on, Quart17's own
+// button folder comes first (works without Vela). Otherwise, and for any missing file, Vela's order
+// (PIconView refresh): a theme's explicit PNG, the theme's CA animation, the theme's other PNG names,
+// then Vela's default: the native animated MediaControls glyph, and an SF Symbol only if that is missing.
+static NSDictionary *QControlArt(NSString *root, NSString *key, NSString *state, NSString *ownName, NSString *symbol,
+                                 BOOL custom) {
+    NSString *own = custom ? QVelaPNG(QJbroot(@"/Library/Application Support/Quart17/Buttons"), ownName) : nil;
+    if (own) return @{@"png": own};
+    BOOL playing = [state isEqualToString:@"playing"];
+    NSDictionary *mapping = root ? QVelaMapping(root, key) : nil;
+    NSString *systemPackage = [key isEqualToString:@"media.play"] ? @"PlayPauseStop.ca" : @"ForwardBackward.ca";
+    NSArray *packageStates = [key isEqualToString:@"media.play"] ? @[playing ? @"pause" : @"play"] : @[state, @"State 1", @"default"];
+    id mappedState = [mapping[@"States"] isKindOfClass:NSDictionary.class] ? mapping[@"States"][state] : nil;
+    if ([mappedState isKindOfClass:NSString.class]) packageStates = @[mappedState];
+    if (root) {
+        NSMutableArray *explicitStems = [NSMutableArray new];
+        id images = mapping[@"Images"];
+        if ([images isKindOfClass:NSDictionary.class] && (images[state] ?: images[@"default"]))
+            [explicitStems addObject:images[state] ?: images[@"default"]];
+        [explicitStems addObjectsFromArray:@[[NSString stringWithFormat:@"Icons/%@/%@", key, state],
+                                             [NSString stringWithFormat:@"Icons/%@/default", key],
+                                             [@"Icons" stringByAppendingPathComponent:key]]];
+        NSString *legacy = @{@"media.previous": @"rewind", @"media.next": @"skip"}[key] ?: (playing ? @"pause" : @"play");
+        NSString *onOff = playing ? @"-on" : @"-off";
+        NSString *prysm = [@"Folders/Prysm/Icons" stringByAppendingPathComponent:legacy];
+        [explicitStems addObjectsFromArray:@[[prysm stringByAppendingString:onOff], prysm]];
+        for (id stem in explicitStems) {
+            NSString *path = QVelaPNG(root, stem);
+            if (path) return @{@"png": path, @"theme": @YES};
+        }
+        NSString *package = [mapping[@"Package"] isKindOfClass:NSString.class] ? QVelaResource(root, mapping[@"Package"]) : nil;
+        if (!QVelaPackage(package)) package = QVelaResource(root, [NSString stringWithFormat:@"Animations/%@.ca", key]);
+        if (!QVelaPackage(package)) {
+            package = nil;
+            for (NSString *prefix in @[@"映射文件", @"", @"Animations"]) {
+                NSString *candidate = QVelaResource(root, [prefix stringByAppendingPathComponent:
+                    [@"PrivateFrameworks/MediaControls.framework" stringByAppendingPathComponent:systemPackage]]);
+                if (QVelaPackage(candidate)) { package = candidate; break; }
+            }
+        }
+        if (package) {
+            id mirror = mapping[@"Mirror"];
+            BOOL mirrored = [mirror isKindOfClass:NSNumber.class] ? [mirror boolValue] :
+                ([key isEqualToString:@"media.previous"] && !mapping[@"Package"] &&
+                 ([package.lastPathComponent isEqualToString:@"ForwardBackward.ca"] ||
+                  [package.lastPathComponent isEqualToString:@"media.previous.ca"]));
+            return @{@"package": package, @"states": packageStates, @"mirror": @(mirrored)};
+        }
+        NSArray *names = @{@"media.previous": @[@"backward.fill"], @"media.next": @[@"forward.fill"]}[key] ?:
+            (playing ? @[@"pause.fill", @"pause"] : @[@"play.fill", @"play"]);
+        NSMutableArray *stems = [NSMutableArray new];
+        for (NSString *name in names) [stems addObject:[@"Bundles/com.apple.MediaControls" stringByAppendingPathComponent:name]];
+        for (NSString *stem in @[[@"Icons" stringByAppendingPathComponent:legacy], legacy])
+            [stems addObjectsFromArray:@[[stem stringByAppendingString:onOff], stem]];
+        for (NSString *name in names) [stems addObjectsFromArray:@[[@"UIImages" stringByAppendingPathComponent:name], name]];
+        for (id stem in stems) {
+            NSString *path = QVelaPNG(root, stem);
+            if (path) return @{@"png": path, @"theme": @YES};
+        }
+    }
+    NSString *native = [@"/System/Library/PrivateFrameworks/MediaControls.framework" stringByAppendingPathComponent:systemPackage];
+    if (QVelaPackage(native))
+        return @{@"package": native, @"states": packageStates, @"native": @YES,
+                 @"mirror": @([key isEqualToString:@"media.previous"])};
+    return @{@"symbol": symbol};
+}
+
+// Trim transparent margins (as Vela does); single-ink art stays tintable, colored art keeps its colors.
+static UIImage *QPreparedGlyph(UIImage *image, BOOL forceTemplate) {
+    if (!image || image.size.width < 1 || image.size.height < 1) return nil;
+    const CGFloat side = 128;
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
+    format.scale = 1;
+    UIImage *sample = [[[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(side, side) format:format]
+        imageWithActions:^(__unused UIGraphicsImageRendererContext *context) {
+            CGFloat scale = MIN(side / image.size.width, side / image.size.height);
+            [image drawInRect:CGRectMake((side - image.size.width * scale) / 2, (side - image.size.height * scale) / 2,
+                                         image.size.width * scale, image.size.height * scale)];
+        }];
+    NSMutableData *buffer = [NSMutableData dataWithLength:128 * 128 * 4];
+    unsigned char *pixels = buffer.mutableBytes;
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    CGContextRef context = CGBitmapContextCreate(pixels, 128, 128, 8, 512, space,
+                                                 kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(space);
+    if (!context) return nil;
+    CGContextDrawImage(context, CGRectMake(0, 0, side, side), sample.CGImage);
+    CGContextRelease(context);
+    NSInteger left = 128, top = 128, right = -1, bottom = -1;
+    BOOL single = YES, found = NO;
+    CGFloat reference[3] = {0};
+    for (NSInteger y = 0; y < 128; y++) for (NSInteger x = 0; x < 128; x++) {
+        unsigned char *p = pixels + (y * 128 + x) * 4;
+        if (p[3] > 24) { left = MIN(left, x); right = MAX(right, x); top = MIN(top, y); bottom = MAX(bottom, y); }
+        if (p[3] < 48 || !single) continue;
+        CGFloat r = (CGFloat)p[0] / p[3], g = (CGFloat)p[1] / p[3], b = (CGFloat)p[2] / p[3];
+        CGFloat high = MAX(r, MAX(g, b)), low = MIN(r, MIN(g, b));
+        if (high - low > .065 && high > .22) single = NO;
+        else if (!found) { reference[0] = r; reference[1] = g; reference[2] = b; found = YES; }
+        else if (fabs(r - reference[0]) > .065 || fabs(g - reference[1]) > .065 || fabs(b - reference[2]) > .065) single = NO;
+    }
+    if (right < left) return nil;
+    CGImageRef cropped = CGImageCreateWithImageInRect(sample.CGImage, CGRectMake(left, top, right - left + 1, bottom - top + 1));
+    if (!cropped) return nil;
+    UIImage *result = [UIImage imageWithCGImage:cropped scale:1 orientation:UIImageOrientationUp];
+    CGImageRelease(cropped);
+    return [result imageWithRenderingMode:forceTemplate || (single && found) ?
+            UIImageRenderingModeAlwaysTemplate : UIImageRenderingModeAlwaysOriginal];
+}
+
+static UIImage *QArtImage(NSDictionary *art) {
+    static NSCache *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSCache new]; cache.countLimit = 32; });
+    NSString *path = art[@"png"];
+    NSDate *modified = path ? [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil].fileModificationDate : nil;
+    NSString *cacheKey = path ? [NSString stringWithFormat:@"%@|%f", path, modified.timeIntervalSince1970] : art[@"symbol"];
+    if (!cacheKey) return nil;
+    UIImage *glyph = [cache objectForKey:cacheKey];
+    if (glyph) return glyph;
+    if (path) {
+        NSData *data = [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil].fileSize <= 4194304 ?
+            [NSData dataWithContentsOfFile:path] : nil;
+        UIImage *image = data ? [UIImage imageWithData:data] : nil;
+        // Quart17's own folder has always been drawn as a template; Vela art keeps its colors if it has any.
+        if (MAX(image.size.width * image.scale, image.size.height * image.scale) <= 1024)
+            glyph = QPreparedGlyph(image, ![art[@"theme"] boolValue]);
+    } else {
+        glyph = QPreparedGlyph([UIImage systemImageNamed:art[@"symbol"] withConfiguration:
+            [UIImageSymbolConfiguration configurationWithPointSize:64 weight:UIImageSymbolWeightRegular]], YES);
+    }
+    if (glyph) [cache setObject:glyph forKey:cacheKey];
+    return glyph;
+}
+
+@interface QGlyphButton : UIButton
 @property (nonatomic) BOOL visuallyHidden;
 @property (nonatomic) CGFloat iconSize;
-@property (nonatomic, strong) CAShapeLayer *outlineLayer;
-- (void)useThemeImage:(UIImage *)image;
+// The glyph is fitted inside this fraction of iconSize (width, height).
+@property (nonatomic) CGSize glyphBox;
+@property (nonatomic, strong) UIImageView *glyphView;
+@property (nonatomic, strong) PCAIconHost *animationHost;
+@property (nonatomic, copy) NSDictionary *art;
+@property (nonatomic, copy) NSString *fallbackSymbol;
+- (void)useArt:(NSDictionary *)art;
+- (void)playTap;
 @end
 
-@implementation QOutlineButton
+@implementation QGlyphButton
 
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
         _iconSize = 24;
-        _outlineLayer = [CAShapeLayer layer];
-        _outlineLayer.fillColor = UIColor.clearColor.CGColor;
-        _outlineLayer.lineWidth = 1.65;
-        _outlineLayer.lineJoin = kCALineJoinMiter;
-        _outlineLayer.lineCap = kCALineCapButt;
-        [self.layer addSublayer:_outlineLayer];
+        // 18pt visible height at the default player size (iconSize 24), matching Vela's controls.
+        _glyphBox = CGSizeMake(1.25, 0.75);
+        _glyphView = [UIImageView new];
+        _glyphView.userInteractionEnabled = NO;
+        [self addSubview:_glyphView];
     }
     return self;
 }
 
-- (void)useThemeImage:(UIImage *)image {
-    [self setImage:!self.visuallyHidden && image ? [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] : nil
-          forState:UIControlStateNormal];
-    self.outlineLayer.hidden = self.visuallyHidden || image != nil;
+- (BOOL)qAnimates {
+    return !UIAccessibilityIsReduceMotionEnabled() && self.window && !self.window.hidden;
+}
+
+- (void)useArt:(NSDictionary *)art {
+    NSString *package = self.visuallyHidden ? nil : art[@"package"];
+    if (package) {
+        BOOL native = [art[@"native"] boolValue];
+        if (!self.animationHost || ![self.animationHost.path isEqualToString:package]) {
+            [self.animationHost stop];
+            [self.animationHost removeFromSuperview];
+            PCAIconHost *host = [PCAIconHost new];
+            host.userInteractionEnabled = NO;
+            // Same host setup Vela uses for its media keys.
+            host.nativeSystem = native;
+            host.templateForeground = !native;
+            host.mirrorsHorizontally = [art[@"mirror"] boolValue];
+            host.tintColor = self.tintColor;
+            [self addSubview:host];
+            self.animationHost = host;
+            if (![host loadPath:package]) package = nil;
+        }
+        if (package && ![self.animationHost applyStates:art[@"states"] animated:[self qAnimates] && self.art != nil])
+            package = nil;
+    }
+    if (!package) {
+        [self.animationHost stop];
+        [self.animationHost removeFromSuperview];
+        self.animationHost = nil;
+    }
+    // A package that fails to load falls back to the SF Symbol Vela would show.
+    UIImage *image = self.visuallyHidden || package ? nil :
+        QArtImage(art[@"package"] ? @{@"symbol": self.fallbackSymbol ?: @"play.fill"} : art);
+    self.glyphView.image = image;
+    self.glyphView.hidden = !image;
+    self.art = art;
     [self setNeedsLayout];
 }
 
-- (void)setOutlineKind:(QOutlineKind)outlineKind {
-    _outlineKind = outlineKind;
-    [self setNeedsLayout];
+- (void)playTap {
+    if ([self qAnimates]) [self.animationHost playTap];
+}
+
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    if (self.window) [self.animationHost resume];
+    else [self.animationHost pause];
 }
 
 - (void)tintColorDidChange {
     [super tintColorDidChange];
-    self.outlineLayer.strokeColor = self.tintColor.CGColor;
+    self.animationHost.tintColor = self.tintColor;
 }
 
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGFloat size = self.iconSize > 0 ? self.iconSize : 24;
-    CGRect icon = CGRectMake((CGRectGetWidth(self.bounds) - size) / 2,
-                             (CGRectGetHeight(self.bounds) - size) / 2, size, size);
-    self.outlineLayer.frame = icon;
-    CGFloat c = size / 24.0;
-    UIBezierPath *path = [UIBezierPath bezierPath];
-    if (self.outlineKind == QOutlineKindCircle) {
-        CGFloat inset = 5 * c, side = 14 * c;
-        [path appendPath:[UIBezierPath bezierPathWithOvalInRect:CGRectMake(inset, inset, side, side)]];
-    } else if (self.outlineKind == QOutlineKindSquare) {
-        CGFloat inset = 5 * c, side = 14 * c;
-        [path appendPath:[UIBezierPath bezierPathWithRect:CGRectMake(inset, inset, side, side)]];
-    } else {
-        BOOL left = self.outlineKind == QOutlineKindLeft;
-        [path moveToPoint:CGPointMake((left ? 18 : 6) * c, 5 * c)];
-        [path addLineToPoint:CGPointMake((left ? 6 : 18) * c, 12 * c)];
-        [path addLineToPoint:CGPointMake((left ? 18 : 6) * c, 19 * c)];
-        [path closePath];
-    }
-    self.outlineLayer.path = path.CGPath;
-    self.outlineLayer.strokeColor = self.tintColor.CGColor;
+    CGSize box = CGSizeMake(size * self.glyphBox.width, size * self.glyphBox.height);
+    CGRect boxRect = CGRectMake((CGRectGetWidth(self.bounds) - box.width) / 2,
+                                (CGRectGetHeight(self.bounds) - box.height) / 2, box.width, box.height);
+    self.animationHost.frame = boxRect;
+    CGSize image = self.glyphView.image.size;
+    CGFloat scale = image.width > 0 && image.height > 0 ? MIN(box.width / image.width, box.height / image.height) : 0;
+    CGSize fitted = CGSizeMake(image.width * scale, image.height * scale);
+    self.glyphView.frame = CGRectMake(CGRectGetMidX(boxRect) - fitted.width / 2, CGRectGetMidY(boxRect) - fitted.height / 2,
+                                      fitted.width, fitted.height);
 }
 
 @end
@@ -316,9 +652,9 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
 @property (nonatomic, strong) UISlider *progress;
 @property (nonatomic, strong) UIView *backgroundProgress;
 @property (nonatomic, strong) UIView *backgroundSeekArea;
-@property (nonatomic, strong) QOutlineButton *previousButton;
-@property (nonatomic, strong) QOutlineButton *playButton;
-@property (nonatomic, strong) QOutlineButton *nextButton;
+@property (nonatomic, strong) QGlyphButton *previousButton;
+@property (nonatomic, strong) QGlyphButton *playButton;
+@property (nonatomic, strong) QGlyphButton *nextButton;
 @property (nonatomic, strong) AVRoutePickerView *routeView;
 @property (nonatomic, strong) NSTimer *timer;
 @property (nonatomic, strong) CADisplayLink *progressDisplayLink;
@@ -494,8 +830,8 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
     return self;
 }
 
-- (QOutlineButton *)button:(NSString *)symbol action:(SEL)action {
-    QOutlineButton *button = [[QOutlineButton alloc] initWithFrame:CGRectZero];
+- (QGlyphButton *)button:(NSString *)symbol action:(SEL)action {
+    QGlyphButton *button = [[QGlyphButton alloc] initWithFrame:CGRectZero];
     button.tintColor = [UIColor colorWithWhite:0.22 alpha:1];
     [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
     [self addSubview:button];
@@ -507,12 +843,18 @@ typedef NS_ENUM(NSInteger, QOutlineKind) {
     self.previousButton.visuallyHidden = hideControls;
     self.playButton.visuallyHidden = hideControls;
     self.nextButton.visuallyHidden = hideControls;
-    self.previousButton.outlineKind = QOutlineKindLeft;
-    self.nextButton.outlineKind = QOutlineKindRight;
-    self.playButton.outlineKind = self.playing ? QOutlineKindSquare : QOutlineKindCircle;
-    [self.previousButton useThemeImage:QButtonArtwork(@"previous", 24)];
-    [self.nextButton useThemeImage:QButtonArtwork(@"next", 24)];
-    [self.playButton useThemeImage:QButtonArtwork(self.playing ? @"pause" : @"play", self.playButton.iconSize)];
+    self.playButton.glyphBox = CGSizeMake(0.6, 0.5);   // 18pt of iconSize 36
+    NSString *theme = self.settings[@"velaThemeFolder"];
+    BOOL custom = [self.settings[@"customControlIcons"] boolValue];
+    self.previousButton.fallbackSymbol = @"backward.fill";
+    self.nextButton.fallbackSymbol = @"forward.fill";
+    self.playButton.fallbackSymbol = self.playing ? @"pause.fill" : @"play.fill";
+    [self.previousButton useArt:QControlArt(theme, @"media.previous", @"default", @"previous", @"backward.fill", custom)];
+    [self.nextButton useArt:QControlArt(theme, @"media.next", @"default", @"next", @"forward.fill", custom)];
+    // Vela's media.play states: "playing" shows the pause glyph, "paused" the play glyph.
+    [self.playButton useArt:QControlArt(theme, @"media.play", self.playing ? @"playing" : @"paused",
+                                        self.playing ? @"pause" : @"play", self.playing ? @"pause.fill" : @"play.fill",
+                                        custom)];
 }
 
 - (void)didMoveToWindow {
@@ -630,9 +972,9 @@ static const CGFloat kQPlayerArtworkDesign = 60.0;
     roundness = isfinite(roundness) ? MIN(1, MAX(0, roundness)) : 1;
     CGFloat radius = self.bounds.size.height * roundness / 2;
     self.layer.cornerRadius = radius;
-    self.layer.cornerCurve = kCACornerCurveCircular;
+    self.layer.cornerCurve = QCornerCurveForRoundness(roundness);
     self.artwork.layer.cornerRadius = [self artworkSide] * roundness / 2;
-    self.artwork.layer.cornerCurve = kCACornerCurveCircular;
+    self.artwork.layer.cornerCurve = QCornerCurveForRoundness(roundness);
     BOOL showProgress = [settings[@"showProgress"] boolValue];
     self.progress.hidden = !showProgress || progressStyle != 1;
     self.backgroundProgress.hidden = !showProgress || progressStyle != 0;
@@ -645,6 +987,7 @@ static const CGFloat kQPlayerArtworkDesign = 60.0;
     self.elapsedLabel.hidden = !showProgress;
     self.remainingLabel.hidden = !showProgress;
     self.routeView.hidden = [settings[@"hideRoute"] boolValue];
+    self.layer.borderWidth = QPlayerBorderWidth(settings);
     [self updateControlImages];
     [self updateAccent];
     [self updateScaledFonts];   // 字号只在这里更新（布局之外），避免布局递归
@@ -715,6 +1058,14 @@ static UIColor *QAccentFromImage(UIImage *image) {
     self.previousButton.tintColor = textAccent;
     self.playButton.tintColor = textAccent;
     self.nextButton.tintColor = textAccent;
+    // The border always uses the text colour picked from the artwork.
+    self.layer.borderColor = textAccent.CGColor;
+}
+
+static CGFloat QPlayerBorderWidth(NSDictionary *settings) {
+    if (![settings[@"playerBorderEnabled"] boolValue] || [settings[@"auraPlayerGlass"] boolValue]) return 0;
+    CGFloat width = [settings[@"playerBorderWidth"] doubleValue];
+    return isfinite(width) ? MIN(4, MAX(0.5, width)) : 1.5;
 }
 
 
@@ -1000,9 +1351,17 @@ static NSString *QTextInView(UIView *root) {
     }
 }
 
-- (void)previous:(id)sender { if (QSendCommand) QSendCommand(5, nil); [self refresh]; }
+- (void)previous:(id)sender {
+    [self.previousButton playTap];
+    if (QSendCommand) QSendCommand(5, nil);
+    [self refresh];
+}
 - (void)toggle:(id)sender { if (QSendCommand) QSendCommand(2, nil); [self refresh]; }
-- (void)next:(id)sender { if (QSendCommand) QSendCommand(4, nil); [self refresh]; }
+- (void)next:(id)sender {
+    [self.nextButton playTap];
+    if (QSendCommand) QSendCommand(4, nil);
+    [self refresh];
+}
 - (void)openPlayingApp:(id)sender {
     UIView *host = self.superview;
     id controller = host.nextResponder;
@@ -1158,8 +1517,8 @@ static CGFloat QArtworkSeekFraction(UIView *area, CGPoint point) {
     CGFloat roundness = self.settings[@"playerCornerRoundness"] ? [self.settings[@"playerCornerRoundness"] doubleValue] : 1;
     roundness = isfinite(roundness) ? MIN(1, MAX(0, roundness)) : 1;
     self.layer.cornerRadius = h * roundness / 2;
-    self.layer.cornerCurve = kCACornerCurveCircular;
-    self.backgroundProgress.layer.cornerCurve = kCACornerCurveCircular;
+    self.layer.cornerCurve = QCornerCurveForRoundness(roundness);
+    self.backgroundProgress.layer.cornerCurve = QCornerCurveForRoundness(roundness);
     self.backgroundProgress.layer.allowsEdgeAntialiasing = YES;
     [self updateProgressFill];
     self.backgroundSeekArea.frame = self.bounds;
@@ -1174,25 +1533,13 @@ static CGFloat QArtworkSeekFraction(UIView *area, CGPoint point) {
     CGFloat artY = (h - art) / 2 + verticalShift;
     self.artwork.frame = CGRectMake(pad, artY, art, art);
     self.artwork.layer.cornerRadius = art * roundness / 2;
-    self.artwork.layer.cornerCurve = kCACornerCurveCircular;
+    self.artwork.layer.cornerCurve = QCornerCurveForRoundness(roundness);
     CGRect ringFrame = CGRectInset(self.artwork.frame, -3 * c, -3 * c);
     self.artworkSeekArea.frame = self.bounds;
     CGFloat ringRectPad = 1.25 * c;
     CGRect ringRect = CGRectInset(CGRectMake(0, 0, ringFrame.size.width, ringFrame.size.height), ringRectPad, ringRectPad);
-    CGFloat left = CGRectGetMinX(ringRect), right = CGRectGetMaxX(ringRect);
-    CGFloat top = CGRectGetMinY(ringRect), bottom = CGRectGetMaxY(ringRect);
     CGFloat ringRadius = MIN(ringRect.size.width, ringRect.size.height) * roundness / 2;
-    CGMutablePathRef ringPath = CGPathCreateMutable();
-    CGPathMoveToPoint(ringPath, NULL, CGRectGetMidX(ringRect), top);
-    CGPathAddLineToPoint(ringPath, NULL, right - ringRadius, top);
-    if (ringRadius > 0) CGPathAddArcToPoint(ringPath, NULL, right, top, right, top + ringRadius, ringRadius);
-    CGPathAddLineToPoint(ringPath, NULL, right, bottom - ringRadius);
-    if (ringRadius > 0) CGPathAddArcToPoint(ringPath, NULL, right, bottom, right - ringRadius, bottom, ringRadius);
-    CGPathAddLineToPoint(ringPath, NULL, left + ringRadius, bottom);
-    if (ringRadius > 0) CGPathAddArcToPoint(ringPath, NULL, left, bottom, left, bottom - ringRadius, ringRadius);
-    CGPathAddLineToPoint(ringPath, NULL, left, top + ringRadius);
-    if (ringRadius > 0) CGPathAddArcToPoint(ringPath, NULL, left, top, left + ringRadius, top, ringRadius);
-    CGPathCloseSubpath(ringPath);
+    CGPathRef ringPath = QCreateRoundedRingPath(ringRect, ringRadius, roundness);
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     self.artworkProgressTrack.frame = ringFrame;

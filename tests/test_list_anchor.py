@@ -23,6 +23,10 @@ assert '[qSettings[@"masterEnabled"] boolValue]' in gate and '[qSettings[@"notif
 # Collapsed states stay native: the folded stack at the bottom and the hidden count. Only the expanded list anchors.
 assert "QListAnchorEnabled(list) && !QListCollapsed(list)" in anchored
 assert "@selector(notificationListHidden)" in collapsed
+# Player only (no incoming notifications): never treated as a folded stack, so it starts under the widgets.
+assert "objc_msgSend)(incoming, count) == 0) return NO;" in collapsed
+assert collapsed.index("== 0) return NO;") < collapsed.index("@selector(notificationListHidden)")
+assert collapsed.index("== 0) return NO;") < collapsed.index("isSectionListCurrentlyGroupedWithContentShown")
 for sel in ("masterList", "incomingSectionList", "isSectionListCurrentlyGroupedWithContentShown",
             "isSectionListViewGroupedWithContentShown"):
     assert f"@selector({sel})" in collapsed, sel
@@ -112,3 +116,10 @@ assert switch["cell"] == "PSSwitchCell" and switch["default"] is False
 assert '@"通知从顶部开始": @"Start notifications at top"' in prefs
 assert '@"notificationsFromTop": @"arrow.up.to.line"' in prefs
 print("PASS: root-list scope, preserved system request, restoration, live settings and preference wiring")
+
+# Expanding the large artwork puts the player back at the bottom (native layout) until it collapses.
+assert "return QListAnchorEnabled(list) && !QListCollapsed(list) && !qLargeArtworkExpanded;" in source
+for name in ("nativeartworkexpanded", "nativeartworkcollapsed"):
+    assert 'QLargeArtworkChanged, CFSTR("com.gushi.quart17/' + name + '")' in source
+assert source.index("static void QApplyListAnchor(UIView *list) {") < source.index("static void QLargeArtworkChanged(")
+print("PASS: large artwork returns the player to the bottom")

@@ -16,6 +16,9 @@
 static NSString *const QPrefs = @"com.gushi.quart17";
 static NSMutableDictionary *qSettings;
 static int qCornerStateToken = -1;
+// notifyd drops a name's state once its last token is cancelled. After a respring SpringBoard
+// publishes before MediaRemoteUI registers, so every published state keeps its token open.
+static int qOffsetStateToken = -1, qFlagsStateToken = -1, qBorderStateToken = -1, qVelaStateToken = -1;
 
 static NSHashTable<UIView *> *qActivePlatters;
 static NSHashTable<UIView *> *qActiveNotifications;
@@ -72,6 +75,7 @@ static CGFloat QShrinkScale(void);
 static BOOL QApplyListScaling(UIView *list);
 static void QScheduleListScaling(UIView *list);
 static void QApplyListAnchor(UIView *list);
+static BOOL QPanBelongsToPlayer(UIScrollView *scroll, UIPanGestureRecognizer *pan);
 static void QClearOwnLayerTransform(UIView *list);
 static void QApplyBannerScaling(UIView *banner);
 static void QStyleLockClock(UIView *dateView);
@@ -113,15 +117,14 @@ static void QLoadSettings(void) {
             ((uint64_t)llround(scale * 10000) << 32) |
             0x51700000ULL | (uint64_t)llround(corner * 10000));
     }
-    int offsetToken = -1;
-    if (notify_register_check("com.gushi.quart17/artworkoffset", &offsetToken) == NOTIFY_STATUS_OK) {
+    if (qOffsetStateToken < 0) notify_register_check("com.gushi.quart17/artworkoffset", &qOffsetStateToken);
+    if (qOffsetStateToken >= 0) {
         double offset = [qSettings[@"largeArtworkOffsetY"] doubleValue];
         offset = isfinite(offset) ? MAX(-200, MIN(200, offset)) : 0;
-        notify_set_state(offsetToken, (uint64_t)llround((offset + 200) * 100) + 1);
-        notify_cancel(offsetToken);
+        notify_set_state(qOffsetStateToken, (uint64_t)llround((offset + 200) * 100) + 1);
     }
-    int flagsToken = -1;
-    if (notify_register_check("com.gushi.quart17/artworkflags", &flagsToken) == NOTIFY_STATUS_OK) {
+    if (qFlagsStateToken < 0) notify_register_check("com.gushi.quart17/artworkflags", &qFlagsStateToken);
+    if (qFlagsStateToken >= 0) {
         uint64_t flags = 0x51710000ULL |
             ([qSettings[@"masterEnabled"] boolValue] ? 1ULL : 0) |
             ([qSettings[@"playerEnabled"] boolValue] ? 2ULL : 0) |
@@ -130,8 +133,21 @@ static void QLoadSettings(void) {
         NSArray *keys = @[@"hideControls", @"hideRoute", @"backgroundFromArtwork", @"titleFromArtwork", @"artistFromArtwork", @"progressFromArtwork"];
         for (NSUInteger i = 0; i < keys.count; i++)
             if ([qSettings[keys[i]] boolValue]) flags |= 1ULL << (i + 5);
-        notify_set_state(flagsToken, flags | (1ULL << 11));
-        notify_cancel(flagsToken);
+        notify_set_state(qFlagsStateToken, flags | (1ULL << 11));
+    }
+    if (qBorderStateToken < 0) notify_register_check("com.gushi.quart17/playerborder", &qBorderStateToken);
+    if (qBorderStateToken >= 0) {
+        double width = [qSettings[@"playerBorderWidth"] doubleValue];
+        width = isfinite(width) ? MAX(0.5, MIN(4, width)) : 1.5;
+        notify_set_state(qBorderStateToken, 0x51720000ULL | ([qSettings[@"playerBorderEnabled"] boolValue] ? 0x8000ULL : 0) |
+                                      (uint64_t)llround(width * 100));
+    }
+    if (qVelaStateToken < 0) notify_register_check("com.gushi.quart17/velatheme", &qVelaStateToken);
+    if (qVelaStateToken >= 0) {
+        NSString *velaTheme = qSettings[@"velaThemeFolder"];
+        notify_set_state(qVelaStateToken, (0x5173ULL << 48) |
+            (velaTheme ? (1ULL << 32) | QVelaThemeHash(velaTheme) : 0) |
+            ([qSettings[@"customControlIcons"] boolValue] ? (1ULL << 33) : 0));
     }
     // MediaRemoteUI reads every state above when this arrives, so post only after all are written.
     if (qCornerStateToken >= 0) notify_post("com.gushi.quart17/playercornerchanged");
@@ -1113,18 +1129,26 @@ static BOOL QSend(id target, SEL selector) {
 // bottom as usual, and a further swipe down hides them into the count. Only the expanded list starts
 // under the clock and widgets.
 static BOOL QListCollapsed(UIView *list) {
-    if (QSend(QListResponder(list, @"CSCombinedListViewController"), @selector(notificationListHidden))) return YES;
     id structured = QListResponder(list, @"NCNotificationStructuredListViewController");
     id master = [structured respondsToSelector:@selector(masterList)]
         ? ((id (*)(id, SEL))objc_msgSend)(structured, @selector(masterList)) : nil;
     id incoming = [master respondsToSelector:@selector(incomingSectionList)]
         ? ((id (*)(id, SEL))objc_msgSend)(master, @selector(incomingSectionList)) : nil;
+    // With no incoming notifications (only the player or Live Activities) there is no stack to fold,
+    // although the stack display style still reports the section as grouped: start under the widgets.
+    SEL count = @selector(notificationCount);
+    if ([incoming respondsToSelector:count] && ((NSUInteger (*)(id, SEL))objc_msgSend)(incoming, count) == 0) return NO;
+    if (QSend(QListResponder(list, @"CSCombinedListViewController"), @selector(notificationListHidden))) return YES;
     return QSend(incoming, @selector(isSectionListCurrentlyGroupedWithContentShown)) ||
            QSend(incoming, @selector(isSectionListViewGroupedWithContentShown));
 }
 
+// MediaRemoteUI reports when the large artwork is expanded; the native layout then puts the player
+// back at the bottom under the artwork, so the list leaves the top anchor until it collapses.
+static BOOL qLargeArtworkExpanded;
+
 static BOOL QListAnchoredToTop(UIView *list) {
-    return QListAnchorEnabled(list) && !QListCollapsed(list);
+    return QListAnchorEnabled(list) && !QListCollapsed(list) && !qLargeArtworkExpanded;
 }
 
 // Lowest visible clock, date or widget edge on the cover sheet, in the list's coordinates; NAN when it
@@ -1272,6 +1296,28 @@ static void QApplyListAnchor(UIView *list) {
     }
 }
 
+static void QLargeArtworkChanged(CFNotificationCenterRef center, void *observer, CFStringRef name,
+                                 const void *object, CFDictionaryRef userInfo) {
+    BOOL expanded = CFEqual(name, CFSTR("com.gushi.quart17/nativeartworkexpanded"));
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (qLargeArtworkExpanded == expanded) return;
+        qLargeArtworkExpanded = expanded;
+        for (UIView *list in qActiveLists.allObjects) {
+            if (!QListAnchorEnabled(list) || QListCollapsed(list)) continue;
+            // Leaving the anchor restores the system's own request; the cover-sheet list lays out from the bottom.
+            if (expanded && !objc_getAssociatedObject(list, QListRequestedFromBottomKey))
+                objc_setAssociatedObject(list, QListRequestedFromBottomKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:1 initialSpringVelocity:0
+                                options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                             animations:^{
+                QApplyListAnchor(list);
+                QRefreshListInsets(list);
+                [list layoutIfNeeded];
+            } completion:nil];
+        }
+    });
+}
+
 static void QScheduleListScaling(UIView *list) {
     if (!list || objc_getAssociatedObject(list, QScalePendingKey)) return;
     objc_setAssociatedObject(list, QScalePendingKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -1334,6 +1380,13 @@ static void QScheduleListScaling(UIView *list) {
 - (void)didMoveToWindow {
     %orig;
     QApplyListAnchor((UIView *)self);
+}
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
+    UIScrollView *scroll = (UIScrollView *)self;
+    if ([scroll isKindOfClass:UIScrollView.class] && gesture == scroll.panGestureRecognizer &&
+        QPanBelongsToPlayer(scroll, scroll.panGestureRecognizer)) return NO;
+    return %orig;
 }
 
 - (void)layoutSubviews {
@@ -1478,6 +1531,44 @@ static void QLayoutSpringBoardPlayer(UIView *platter, BOOL show) {
     player.hidden = NO;
     platter.alpha = 1;
     platter.layer.opacity = 0;
+}
+
+// The list's vertical pan and the player's seek pan race for the same touch. A few points of vertical
+// drift let the list win first and cancel the player's touches (in MediaRemoteUI on iOS 17), so only
+// perfectly horizontal drags could seek. Yield the list pan when it starts where the player would seek
+// and moves the way the player accepts (QPlayerView's |dx| > |dy| / 2); steeper drags still scroll.
+static BOOL QPanBelongsToPlayer(UIScrollView *scroll, UIPanGestureRecognizer *pan) {
+    if (![qSettings[@"masterEnabled"] boolValue] || ![qSettings[@"playerEnabled"] boolValue] ||
+        ![qSettings[@"showProgress"] boolValue] || !scroll.window) return NO;
+    CGPoint moved = [pan translationInView:nil];
+    if (!(fabs(moved.x) > fabs(moved.y) * 0.5)) return NO;
+    CGPoint now = [pan locationInView:nil];
+    CGPoint start = CGPointMake(now.x - moved.x, now.y - moved.y);
+    for (UIView *platter in qActivePlatters.allObjects) {
+        if (platter.window != scroll.window) continue;
+        UIView *player = objc_getAssociatedObject(platter, QSpringBoardPlayerKey);
+        CGRect rect;
+        if (player) {
+            rect = [player convertRect:player.bounds toView:nil];
+        } else if ([objc_getAssociatedObject(platter, QPlatterChromeHiddenKey) boolValue]) {
+            // Same placement as QCompactPlayer: up to 88pt tall, centred in the native host.
+            CGSize size = platter.bounds.size;
+            CGFloat height = MIN(88, MAX(0, size.height - 8));
+            rect = [platter convertRect:CGRectMake(0, (size.height - height) / 2, size.width, height) toView:nil];
+        } else {
+            continue;
+        }
+        CGFloat c = rect.size.height / 88.0;
+        // Playback buttons and the route picker keep their own touches.
+        rect.size.width = MAX(0, rect.size.width - 118 * c);
+        if ([qSettings[@"progressStyle"] integerValue] == 1) {
+            // Bottom bar style seeks on the bar only.
+            rect.origin.y = CGRectGetMaxY(rect) - 31 * c;
+            rect.size.height = 31 * c;
+        }
+        if (CGRectContainsPoint(rect, start)) return YES;
+    }
+    return NO;
 }
 
 static void QApplyPlatterChrome(UIView *platter, NSUInteger attempt) {
@@ -1890,6 +1981,16 @@ static void QRestyleLockClockForWidget(UIView *widget) {
                                         NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
                                         QChanged, CFSTR("com.gushi.aura/preferenceschanged"),
+                                        NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+                                        QLargeArtworkChanged, CFSTR("com.gushi.quart17/nativeartworkexpanded"),
+                                        NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+                                        QLargeArtworkChanged, CFSTR("com.gushi.quart17/nativeartworkcollapsed"),
+                                        NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+        // Vela posts this after its icon theme changes; the player buttons follow that theme.
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+                                        QChanged, CFSTR("com.gushi.vela/changed"),
                                         NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"]) {
             [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification

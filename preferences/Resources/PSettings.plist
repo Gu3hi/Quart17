@@ -36,6 +36,26 @@
 			<key>get</key>
 			<string>readPreferenceValue:</string>
 			<key>key</key>
+			<string>playerCornerRoundness</string>
+			<key>label</key>
+			<string>播放器圆角</string>
+			<key>max</key>
+			<real>1.0</real>
+			<key>min</key>
+			<real>0.0</real>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSStaticTextCell</string>
+			<key>cellClass</key>
+			<string>QWidthSliderCell</string>
+			<key>default</key>
+			<real>1.0</real>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>key</key>
 			<string>largeArtworkScale</string>
 			<key>label</key>
 			<string>大封面大小</string>
@@ -141,6 +161,8 @@
 		<dict>
 			<key>cell</key>
 			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>关闭时按钮图标完全跟随 Vela 当前主题（含动态图标），在 Vela 中更换主题后自动更新。打开「自定义播放控制图标」后使用按钮图标目录中的静态 PNG（previous、play、pause、next），缺少的图标仍跟随 Vela。</string>
 			<key>label</key>
 			<string>控制按钮</string>
 		</dict>
@@ -173,12 +195,70 @@
 			<string>setPreferenceValue:specifier:</string>
 		</dict>
 		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>key</key>
+			<string>customControlIcons</string>
+			<key>label</key>
+			<string>自定义播放控制图标</string>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+		</dict>
+		<dict>
 			<key>action</key>
 			<string>showButtonIconPath:</string>
 			<key>cell</key>
 			<string>PSButtonCell</string>
 			<key>label</key>
 			<string>按钮图标目录</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>描边颜色使用从封面提取的文字颜色。开启 Aura 的播放器玻璃效果时不显示描边。</string>
+			<key>label</key>
+			<string>描边</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>key</key>
+			<string>playerBorderEnabled</string>
+			<key>label</key>
+			<string>播放器描边</string>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSStaticTextCell</string>
+			<key>cellClass</key>
+			<string>QWidthSliderCell</string>
+			<key>default</key>
+			<real>1.5</real>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>key</key>
+			<string>playerBorderWidth</string>
+			<key>label</key>
+			<string>描边粗细</string>
+			<key>max</key>
+			<real>4.0</real>
+			<key>min</key>
+			<real>0.5</real>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+			<key>unit</key>
+			<string>halfPt</string>
 		</dict>
 		<dict>
 			<key>cell</key>

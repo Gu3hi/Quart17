@@ -124,6 +124,14 @@ static id QReadPref(NSString *key, id fallback) {
     NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:QPrefsPath()];
     return settings[key] ?: fallback;
 }
+// Quart17 owns the player corner; until it is changed here, the value previously set in Aura applies.
+static id QPlayerCornerPref(void) {
+    id own = QReadPref(@"playerCornerRoundness", nil);
+    if (own) return own;
+    NSDictionary *aura = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.gushi.aura.plist"];
+    return aura[@"playerCornerRoundness"] ?: @1;
+}
+
 static void QWritePref(NSString *key, id value) {
     if (!key.length || !value) return;
     NSMutableDictionary *settings = [[NSDictionary dictionaryWithContentsOfFile:QPrefsPath()] mutableCopy]
@@ -144,22 +152,30 @@ static void QWritePref(NSString *key, id value) {
         notify_set_state(flagsToken, flags);
         notify_cancel(flagsToken);
     }
+    // Player border for MediaRemoteUI: bit 15 = enabled, low bits = width in hundredths of a point.
+    int borderToken = -1;
+    if (notify_register_check("com.gushi.quart17/playerborder", &borderToken) == NOTIFY_STATUS_OK) {
+        double width = [settings[@"playerBorderWidth"] ?: @1.5 doubleValue];
+        width = isfinite(width) ? MAX(0.5, MIN(4, width)) : 1.5;
+        notify_set_state(borderToken, 0x51720000ULL | ([settings[@"playerBorderEnabled"] boolValue] ? 0x8000ULL : 0) |
+                                      (uint64_t)llround(width * 100));
+        notify_cancel(borderToken);
+    }
     [settings writeToFile:QPrefsPath() atomically:YES];
     CFPreferencesSetValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)value,
         CFSTR("com.gushi.quart17"), kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
     CFPreferencesSynchronize(CFSTR("com.gushi.quart17"),
         kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
     if ([key isEqualToString:@"largeArtworkScale"] ||
-        [key isEqualToString:@"largeArtworkRoundness"]) {
+        [key isEqualToString:@"largeArtworkRoundness"] ||
+        [key isEqualToString:@"playerCornerRoundness"]) {
         int token = -1;
         if (notify_register_check("com.gushi.quart17/playercorner", &token) == NOTIFY_STATUS_OK) {
-            NSDictionary *aura = [NSDictionary dictionaryWithContentsOfFile:
-                @"/var/mobile/Library/Preferences/com.gushi.aura.plist"];
-            double corner = [aura[@"playerCornerRoundness"] ?: @1 doubleValue];
+            double corner = [settings[@"playerCornerRoundness"] ?: QPlayerCornerPref() doubleValue];
             corner = isfinite(corner) ? MAX(0, MIN(1, corner)) : 1;
             double scale = [settings[@"largeArtworkScale"] ?: @1 doubleValue];
             scale = isfinite(scale) ? MAX(0.6, MIN(1, scale)) : 1;
-            id expandedValue = settings[@"largeArtworkRoundness"] ?: settings[@"playerCornerRoundness"] ?: @1;
+            id expandedValue = settings[@"largeArtworkRoundness"] ?: @(corner);
             double expandedCorner = [expandedValue doubleValue];
             expandedCorner = isfinite(expandedCorner) ? MAX(0, MIN(1, expandedCorner)) : corner;
             notify_set_state(token, ((uint64_t)llround(expandedCorner * 10000) << 48) |
@@ -270,8 +286,9 @@ static void QWritePref(NSString *key, id value) {
     self.detailTextLabel.hidden = YES;
     self.qTitleLabel.text = specifier.name;
     id raw = QReadPref(specifier.properties[@"key"], nil);
-    if (!raw && [specifier.properties[@"key"] isEqualToString:@"largeArtworkRoundness"])
-        raw = QReadPref(@"playerCornerRoundness", @1);
+    if (!raw && ([specifier.properties[@"key"] isEqualToString:@"largeArtworkRoundness"] ||
+                 [specifier.properties[@"key"] isEqualToString:@"playerCornerRoundness"]))
+        raw = QPlayerCornerPref();
     double v = [self rangeValue:raw ?: specifier.properties[@"default"]];
     self.qSlider.value = (float)v;
     BOOL scalingDisabled = [specifier.properties[@"key"] isEqualToString:@"widthScale"] &&
@@ -296,6 +313,8 @@ static void QWritePref(NSString *key, id value) {
 - (NSString *)percentForValue:(double)v specifier:(PSSpecifier *)specifier {
     if ([specifier.properties[@"unit"] isEqualToString:@"pt"])
         return [NSString stringWithFormat:@"%.0f pt", round(v)];
+    if ([specifier.properties[@"unit"] isEqualToString:@"halfPt"])
+        return [NSString stringWithFormat:@"%.1f pt", round(v * 2.0) / 2.0];
     NSString *key = specifier.properties[@"key"];
     if ([key isEqualToString:@"desktopVeil"] || [key isEqualToString:@"lockVeil"] ||
         [key isEqualToString:@"alertVeil"] || [key isEqualToString:@"ccVeil"])
@@ -310,6 +329,8 @@ static void QWritePref(NSString *key, id value) {
 }
 
 - (void)sliderCommitted:(UISlider *)slider {
+    if ([self.specifier.properties[@"unit"] isEqualToString:@"halfPt"])
+        slider.value = (float)(round(slider.value * 2.0) / 2.0);
     [self sliderChanged:slider];
     NSString *key = self.specifier.properties[@"key"];
     QWritePref(key, @(slider.value));
@@ -322,7 +343,7 @@ static void QWritePref(NSString *key, id value) {
 - (void)adjustValueBy:(double)direction {
     BOOL wholeNumber = [self.specifier.properties[@"unit"] isEqualToString:@"pt"] ||
         [self.specifier.properties[@"key"] isEqualToString:@"largeArtworkOffsetY"];
-    double step = wholeNumber ? 1.0 : 0.01;
+    double step = wholeNumber ? 1.0 : [self.specifier.properties[@"unit"] isEqualToString:@"halfPt"] ? 0.5 : 0.01;
     double value = round(self.qSlider.value / step) * step + direction * step;
     self.qSlider.value = (float)[self rangeValue:@(value)];
     [self sliderCommitted:self.qSlider];
@@ -533,11 +554,14 @@ static void QWritePref(NSString *key, id value) {
             @"largeArtworkOffsetY": @"arrow.up.and.down",
             @"showProgress": @"slider.horizontal.3", @"progressStyle": @"circle.dotted.circle",
             @"hideControls": @"eye.slash",
+            @"customControlIcons": @"photo.on.rectangle",
             @"hideRoute": @"airplay.audio", @"backgroundFromArtwork": @"paintpalette.fill",
             @"titleFromArtwork": @"textformat", @"artistFromArtwork": @"person.fill",
             @"progressFromArtwork": @"line.diagonal",
             @"showNotificationCount": @"number.circle",
             @"notificationsFromTop": @"arrow.up.to.line",
+            @"playerBorderEnabled": @"square.dashed", @"playerBorderWidth": @"lineweight",
+            @"playerCornerRoundness": @"play.rectangle",
             @"notificationsLink": @"bell.badge", @"playerLink": @"play.rectangle.fill"
         };
         NSDictionary *namedSymbols = @{
@@ -562,6 +586,8 @@ static void QWritePref(NSString *key, id value) {
             @"通知外观": @"Notifications",
             @"通知计数": @"Notification count",
             @"位置": @"Position", @"通知从顶部开始": @"Start notifications at top",
+            @"描边": @"Border", @"播放器描边": @"Player border", @"描边粗细": @"Border width",
+            @"播放器圆角": @"Player corners",
             @"控制通知计数和通知缩放；关闭后恢复原生大小并隐藏计数。玻璃外观请到 Aura 设置。": @"Controls notification counts and scaling. Turn off to restore native sizes and hide counts. Glass appearance is in Aura.",
             @"锁屏手势": @"Lock Screen gestures",
             @"右侧双下滑清除": @"Double swipe down to clear",
@@ -572,7 +598,7 @@ static void QWritePref(NSString *key, id value) {
             @"大封面上下位移": @"Artwork vertical offset",
             @"显示播放进度": @"Show playback progress",
             @"进度条样式": @"Progress style", @"隐藏控制按钮": @"Hide playback buttons",
-            @"按钮图标目录": @"Button icon folder",
+            @"按钮图标目录": @"Button icon folder", @"自定义播放控制图标": @"Custom playback icons",
             @"隐藏音频输出入口": @"Hide audio output control",
             @"跟随封面颜色": @"Artwork Colors", @"播放器背景": @"Player background",
             @"歌曲标题": @"Song title", @"作者文字": @"Artist text",
@@ -599,6 +625,8 @@ static void QWritePref(NSString *key, id value) {
             @"三种进度样式只能选择一种。点右上角“刷新”可更新样式，不会中断音频。": @"Choose one of three progress styles. Refresh updates the style without interrupting audio.",
             @"大封面与环绕进度条一起缩放；大封面圆角可单独调整。缩小时可上下位移大封面。点击封面展开或收起，展开后可横滑播放器调整进度；点击歌名打开播放 App。": @"Expanded artwork and its progress ring scale together. Adjust expanded artwork corners separately. When shrunk, you can shift the artwork vertically. Tap the cover to expand or collapse it, swipe the player to seek while expanded, or tap the title to open the playing app.",
             @"为每首歌从封面提取颜色。关闭某项后，该项使用固定配色。": @"Pick colors from each song's artwork. Disabled items use fixed colors.",
+            @"关闭时按钮图标完全跟随 Vela 当前主题（含动态图标），在 Vela 中更换主题后自动更新。打开「自定义播放控制图标」后使用按钮图标目录中的静态 PNG（previous、play、pause、next），缺少的图标仍跟随 Vela。": @"When off, the buttons fully follow the current Vela theme, including animated icons, and update when you change themes in Vela. Turn on Custom playback icons to use static PNGs from the button icon folder (previous, play, pause, next); any missing icon still follows Vela.",
+            @"描边颜色使用从封面提取的文字颜色。开启 Aura 的播放器玻璃效果时不显示描边。": @"The border uses the text color picked from the artwork. It is hidden while Aura's player glass is on.",
             @"致敬 @LaughingQuoll\n永远怀念最好的开发者。": @"In tribute to @LaughingQuoll\nForever remembering the best developer.",
         };
         for (PSSpecifier *specifier in specifiers) {
@@ -860,7 +888,9 @@ static void QWritePref(NSString *key, id value) {
     return [super tableView:tableView heightForRowAtIndexPath:indexPath];
 }
 - (id)readPreferenceValue:(PSSpecifier *)specifier {
-    return QReadPref(specifier.properties[@"key"], specifier.properties[@"default"]);
+    NSString *key = specifier.properties[@"key"];
+    if ([key isEqualToString:@"playerCornerRoundness"]) return QPlayerCornerPref();
+    return QReadPref(key, specifier.properties[@"default"]);
 }
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
     NSString *key = specifier.properties[@"key"];

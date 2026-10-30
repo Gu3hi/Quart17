@@ -347,7 +347,7 @@ static UIColor *QArtworkAccent(UIImage *artwork) {
 }
 
 static void QRoundArtworkLayers(UIView *owner, CALayer *layer, CGSize imageSize, CGFloat radius,
-                                NSUInteger depth) {
+                                NSString *curve, NSUInteger depth) {
     if (!layer || depth > 3) return;
     if ([layer isKindOfClass:CAShapeLayer.class]) return;
     CGSize size = layer.bounds.size;
@@ -357,12 +357,11 @@ static void QRoundArtworkLayers(UIView *owner, CALayer *layer, CGSize imageSize,
         QRememberArtworkLayer(owner, layer);
         if (layer.mask) layer.mask = nil;
         if (fabs(layer.cornerRadius - radius) > 0.1) layer.cornerRadius = radius;
-        if (![layer.cornerCurve isEqualToString:kCACornerCurveCircular])
-            layer.cornerCurve = kCACornerCurveCircular;
+        if (![layer.cornerCurve isEqualToString:curve]) layer.cornerCurve = curve;
         if (!layer.masksToBounds) layer.masksToBounds = YES;
     }
     for (CALayer *child in layer.sublayers) {
-        QRoundArtworkLayers(owner, child, imageSize, radius, depth + 1);
+        QRoundArtworkLayers(owner, child, imageSize, radius, curve, depth + 1);
     }
 }
 
@@ -391,7 +390,7 @@ static void QStyleNativeArtwork(UIView *view) {
         if (fabs(size.width - image.bounds.size.width) < 40 &&
             fabs(size.height - image.bounds.size.height) < 40 &&
             fabs(size.width - size.height) < 40) {
-            QRoundArtworkLayers(view, part.layer, image.bounds.size, radius, 0);
+            QRoundArtworkLayers(view, part.layer, image.bounds.size, radius, QCornerCurveForRoundness(roundness), 0);
         }
         if (part == view) break;
     }
@@ -468,7 +467,9 @@ static void QStyleNativeArtwork(UIView *view) {
             objc_setAssociatedObject(image, qSquareMaskKey, squareMask, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         squareMask.frame = image.bounds;
-        squareMask.path = [UIBezierPath bezierPathWithRoundedRect:square cornerRadius:radius].CGPath;
+        // Same curve as the artwork layers: continuous below full roundness, a true circle at 100%.
+        squareMask.path = (roundness >= 0.999 ? [UIBezierPath bezierPathWithOvalInRect:square]
+                                              : [UIBezierPath bezierPathWithRoundedRect:square cornerRadius:radius]).CGPath;
         image.layer.mask = squareMask;
     } else if (squareMask && image.layer.mask == squareMask) {
         image.layer.mask = nil;
@@ -494,24 +495,8 @@ static void QStyleNativeArtwork(UIView *view) {
     CGFloat ringRadius = roundness > 0 ?
         MIN(MIN(imageFrame.size.width, imageFrame.size.height) * roundness / 2 + 7,
             ringFrame.size.width / 2) : 0;
-    CGFloat left = CGRectGetMinX(ringFrame), right = CGRectGetMaxX(ringFrame);
-    CGFloat top = CGRectGetMinY(ringFrame), bottom = CGRectGetMaxY(ringFrame);
-    // Begin at twelve o'clock and follow the outside edge clockwise.
-    CGMutablePathRef path = CGPathCreateMutable();
-    CGPathMoveToPoint(path, NULL, CGRectGetMidX(ringFrame), top);
-    CGPathAddLineToPoint(path, NULL, right - ringRadius, top);
-    if (ringRadius > 0) CGPathAddArcToPoint(path, NULL, right, top,
-                                            right, top + ringRadius, ringRadius);
-    CGPathAddLineToPoint(path, NULL, right, bottom - ringRadius);
-    if (ringRadius > 0) CGPathAddArcToPoint(path, NULL, right, bottom,
-                                            right - ringRadius, bottom, ringRadius);
-    CGPathAddLineToPoint(path, NULL, left + ringRadius, bottom);
-    if (ringRadius > 0) CGPathAddArcToPoint(path, NULL, left, bottom,
-                                            left, bottom - ringRadius, ringRadius);
-    CGPathAddLineToPoint(path, NULL, left, top + ringRadius);
-    if (ringRadius > 0) CGPathAddArcToPoint(path, NULL, left, top,
-                                            left + ringRadius, top, ringRadius);
-    CGPathCloseSubpath(path);
+    // Begins at twelve o'clock and follows the outside edge clockwise, in the artwork's corner curve.
+    CGPathRef path = QCreateRoundedRingPath(ringFrame, ringRadius, roundness);
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     track.frame = ringHost.bounds;

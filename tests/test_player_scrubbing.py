@@ -62,3 +62,23 @@ for x, y, expected in [(12, 0, True), (-12, 0, True), (-12, 12, True),
                        (-3, -20, False), (0, 12, False), (0, 0, False)]:
     assert eval(condition, {"__builtins__": {}, "abs": abs}, dict(x=x, y=y)) == expected
 print("PASS: both drag directions tolerate diagonal starts and retain vertical scrolling")
+
+# SpringBoard's list pan yields to the player's seek pan for the same starts and directions, so a drag
+# with vertical drift is not stolen by list scrolling before the player (another process on iOS 17) begins.
+springboard = (root / "springboard/Tweak.xm").read_text(encoding="utf-8")
+yield_fn = springboard.split("static BOOL QPanBelongsToPlayer(UIScrollView *scroll, UIPanGestureRecognizer *pan) {", 1)[1].split("static void QApplyPlatterChrome(", 1)[0]
+sb_condition = re.search(r"if \(!\((fabs\(moved\.x\) > fabs\(moved\.y\) \* 0\.5)\)\) return NO;", yield_fn)[1]
+player_condition = re.search(r"return (fabs\(translation.x\).*?);", begin)[1]
+assert sb_condition.replace("moved", "translation") == player_condition, "list must yield exactly where the player accepts"
+for gate in ('qSettings[@"masterEnabled"]', 'qSettings[@"playerEnabled"]', 'qSettings[@"showProgress"]'):
+    assert gate in yield_fn, gate
+assert "start = CGPointMake(now.x - moved.x, now.y - moved.y)" in yield_fn
+assert "QSpringBoardPlayerKey" in yield_fn and "QPlatterChromeHiddenKey" in yield_fn
+assert "MIN(88, MAX(0, size.height - 8))" in yield_fn and "(size.height - height) / 2" in yield_fn
+assert "rect.size.width - 118 * c" in yield_fn and '[qSettings[@"progressStyle"] integerValue] == 1' in yield_fn
+list_hook = springboard.split("%hook NCNotificationListView", 1)[1].split("%end", 1)[0]
+should_begin = list_hook.split("- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {", 1)[1].split("}", 1)[0]
+assert "gesture == scroll.panGestureRecognizer" in should_begin and "return NO;" in should_begin
+assert "QPanBelongsToPlayer(scroll, scroll.panGestureRecognizer)" in should_begin
+assert list_hook.split("- (BOOL)gestureRecognizerShouldBegin:", 1)[1].split("\n}", 1)[0].rstrip().endswith("return %orig;")
+print("PASS: list scrolling yields to diagonal seeks that start on the player and keeps steep vertical scrolls")
