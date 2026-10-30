@@ -537,6 +537,7 @@ static void QWritePref(NSString *key, id value) {
             @"titleFromArtwork": @"textformat", @"artistFromArtwork": @"person.fill",
             @"progressFromArtwork": @"line.diagonal",
             @"showNotificationCount": @"number.circle",
+            @"notificationsFromTop": @"arrow.up.to.line",
             @"notificationsLink": @"bell.badge", @"playerLink": @"play.rectangle.fill"
         };
         NSDictionary *namedSymbols = @{
@@ -560,6 +561,7 @@ static void QWritePref(NSString *key, id value) {
             @"缩放桌面横幅": @"Scale notification banners",
             @"通知外观": @"Notifications",
             @"通知计数": @"Notification count",
+            @"位置": @"Position", @"通知从顶部开始": @"Start notifications at top",
             @"控制通知计数和通知缩放；关闭后恢复原生大小并隐藏计数。玻璃外观请到 Aura 设置。": @"Controls notification counts and scaling. Turn off to restore native sizes and hide counts. Glass appearance is in Aura.",
             @"锁屏手势": @"Lock Screen gestures",
             @"右侧双下滑清除": @"Double swipe down to clear",
@@ -590,6 +592,7 @@ static void QWritePref(NSString *key, id value) {
              @"时间与顶部日期并排居中，下方小组件同步上移。": @"Center the compact clock beside the top date and move the widgets up.",
              @"调整内容、尺寸和交互，不调整玻璃材质。": @"Adjust content, size, and interaction. Glass materials are in Aura.",
             @"锁屏列表大小控制通知宽度。开启桌面横幅缩放后，弹出的横幅使用相同的大小。": @"Lock Screen list size controls notification width. Enable banner scaling to use the same size for incoming banners.",
+            @"开启后，展开的通知列表和音乐播放器从时间与小组件下方开始排列，可上下滑动浏览；通知叠放时仍在屏幕底部，再下滑按系统方式收起。锁屏和通知中心都生效。": @"The expanded notification list and the music player start right below the clock and widgets and scroll from there. A folded stack stays at the bottom, and swiping down hides it as usual. Applies to the Lock Screen and Notification Center.",
             @"关闭总开关会停用通知与锁屏播放器样式，并收起以下设置。": @"Turn off to disable both styles and collapse the options below.",
             @"锁屏列表大小控制锁屏通知；开启桌面横幅缩放后，弹出的横幅使用相同的大小。": @"Lock Screen list size controls Lock Screen notifications. Enable banner scaling to use the same size for incoming banners.",
             @"从右半屏空白处连续两次下滑清除普通通知；滚动列表不会计入。保留音乐控件和实时活动；左半屏下滑打开系统搜索。": @"Swipe down twice from empty space on the right half to clear ordinary notifications. Scrolling the list does not count. Media controls and Live Activities stay; swiping down on the left opens system Search.",

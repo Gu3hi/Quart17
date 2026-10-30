@@ -32,6 +32,8 @@ static void *QLockClockTopContentKey = &QLockClockTopContentKey;
 static void *QLockClockNormalDateKey = &QLockClockNormalDateKey;
 static void *QLockClockNormalDateDayKey = &QLockClockNormalDateDayKey;
 static BOOL qStylingLockClock;
+static BOOL qLockClockRetryPending;
+static CFAbsoluteTime qLockClockRetryAt;
 static void *QOriginalStyleKey = &QOriginalStyleKey;
 static void *QOwnLayerTransformKey = &QOwnLayerTransformKey;
 static void *QOriginalLayerTransformKey = &QOriginalLayerTransformKey;
@@ -69,6 +71,7 @@ static void QStyle(UIView *root);
 static CGFloat QShrinkScale(void);
 static BOOL QApplyListScaling(UIView *list);
 static void QScheduleListScaling(UIView *list);
+static void QApplyListAnchor(UIView *list);
 static void QClearOwnLayerTransform(UIView *list);
 static void QApplyBannerScaling(UIView *banner);
 static void QStyleLockClock(UIView *dateView);
@@ -109,7 +112,6 @@ static void QLoadSettings(void) {
         notify_set_state(qCornerStateToken, ((uint64_t)llround(expandedCorner * 10000) << 48) |
             ((uint64_t)llround(scale * 10000) << 32) |
             0x51700000ULL | (uint64_t)llround(corner * 10000));
-        notify_post("com.gushi.quart17/playercornerchanged");
     }
     int offsetToken = -1;
     if (notify_register_check("com.gushi.quart17/artworkoffset", &offsetToken) == NOTIFY_STATUS_OK) {
@@ -131,6 +133,8 @@ static void QLoadSettings(void) {
         notify_set_state(flagsToken, flags | (1ULL << 11));
         notify_cancel(flagsToken);
     }
+    // MediaRemoteUI reads every state above when this arrives, so post only after all are written.
+    if (qCornerStateToken >= 0) notify_post("com.gushi.quart17/playercornerchanged");
 }
 
 static void QChanged(CFNotificationCenterRef center, void *observer, CFStringRef name,
@@ -154,7 +158,10 @@ static void QChanged(CFNotificationCenterRef center, void *observer, CFStringRef
             [platter layoutIfNeeded];
         }
         for (UIView *notification in qActiveNotifications.allObjects) QStyle(notification);
-        for (UIView *list in qActiveLists.allObjects) QScheduleListScaling(list);
+        for (UIView *list in qActiveLists.allObjects) {
+            QApplyListAnchor(list);
+            QScheduleListScaling(list);
+        }
         for (UIView *banner in qActiveBanners.allObjects) QApplyBannerScaling(banner);
         for (UIView *dateView in qLockClockViews.allObjects) QStyleLockClock(dateView);
     });
@@ -629,6 +636,7 @@ static void QUpdateStackState(UIView *root) {
 }
 
 static BOOL qRefreshingStackStates = NO;
+static BOOL qStackRefreshScheduled = NO;
 static CFAbsoluteTime qLastStackRefresh = 0;
 
 // Fold/unfold animations move the stacked cards via transforms, which do not
@@ -641,7 +649,18 @@ static void QRefreshStackStatesIn(UIView *container) {
     if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"]) return;
     if (!container.window || qRefreshingStackStates) return;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - qLastStackRefresh < 0.15) return;
+    if (now - qLastStackRefresh < 0.15) {
+        // Trailing pass: the last layout of a fold animation must still update the badge.
+        if (qStackRefreshScheduled) return;
+        qStackRefreshScheduled = YES;
+        __weak UIView *weakContainer = container;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.16 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            qStackRefreshScheduled = NO;
+            QRefreshStackStatesIn(weakContainer);
+        });
+        return;
+    }
     qLastStackRefresh = now;
     qRefreshingStackStates = YES;
     for (UIView *root in qActiveNotifications.allObjects) {
@@ -662,6 +681,8 @@ static void QStyle(UIView *root) {
 }
 
 @interface PLPlatterView : UIView
+@end
+@interface MTMaterialView : UIView
 @end
 extern "C" void QInstallNativeArtworkHooks(void);
 
@@ -1045,6 +1066,212 @@ static BOOL QTouchOnNotificationCell(UIWindow *window, CGPoint start) {
 %end
 %end
 
+@interface CSCombinedListViewController : UIViewController
+@end
+
+@interface CSCoverSheetView : UIView
+@end
+
+@interface NCNotificationStructuredSectionList : NSObject
+@end
+
+@interface UIView (QListAnchorProbe)
+- (BOOL)layoutFromBottom;
+- (void)setLayoutFromBottom:(BOOL)layoutFromBottom;
+@end
+
+static void *QListRequestedFromBottomKey = &QListRequestedFromBottomKey;
+static void *QListInsetRefreshKey = &QListInsetRefreshKey;
+static void *QListAnchorBottomKey = &QListAnchorBottomKey;
+static void *QListInsetPendingKey = &QListInsetPendingKey;
+static __weak UIView *qAnchorRootList;
+
+// Only the cover-sheet root list (lock screen and Notification Center) is re-anchored; nested group lists keep theirs.
+static BOOL QIsCoverSheetRootList(UIView *list) {
+    if (!list.window || ![NSStringFromClass(list.class) isEqualToString:@"NCNotificationListView"]) return NO;
+    for (UIView *ancestor = list.superview; ancestor; ancestor = ancestor.superview)
+        if ([NSStringFromClass(ancestor.class) isEqualToString:@"NCNotificationListView"]) return NO;
+    return QHasAncestor(list, @"CSCoverSheetViewBase");
+}
+
+static BOOL QListAnchorEnabled(UIView *list) {
+    return [qSettings[@"masterEnabled"] boolValue] && [qSettings[@"notificationsFromTop"] boolValue] &&
+           QIsCoverSheetRootList(list);
+}
+
+static id QListResponder(UIView *list, NSString *className) {
+    for (UIResponder *responder = list.nextResponder; responder; responder = responder.nextResponder)
+        if ([NSStringFromClass(responder.class) isEqualToString:className]) return responder;
+    return nil;
+}
+
+static BOOL QSend(id target, SEL selector) {
+    return [target respondsToSelector:selector] && ((BOOL (*)(id, SEL))objc_msgSend)(target, selector);
+}
+
+// Collapsed states keep the native layout: the incoming notifications folded into a stack sit at the
+// bottom as usual, and a further swipe down hides them into the count. Only the expanded list starts
+// under the clock and widgets.
+static BOOL QListCollapsed(UIView *list) {
+    if (QSend(QListResponder(list, @"CSCombinedListViewController"), @selector(notificationListHidden))) return YES;
+    id structured = QListResponder(list, @"NCNotificationStructuredListViewController");
+    id master = [structured respondsToSelector:@selector(masterList)]
+        ? ((id (*)(id, SEL))objc_msgSend)(structured, @selector(masterList)) : nil;
+    id incoming = [master respondsToSelector:@selector(incomingSectionList)]
+        ? ((id (*)(id, SEL))objc_msgSend)(master, @selector(incomingSectionList)) : nil;
+    return QSend(incoming, @selector(isSectionListCurrentlyGroupedWithContentShown)) ||
+           QSend(incoming, @selector(isSectionListViewGroupedWithContentShown));
+}
+
+static BOOL QListAnchoredToTop(UIView *list) {
+    return QListAnchorEnabled(list) && !QListCollapsed(list);
+}
+
+// Lowest visible clock, date or widget edge on the cover sheet, in the list's coordinates; NAN when it
+// cannot be measured. Scrolling pushes the whole date view away (its frame and transform) and fades the
+// rows, so it is only measured while the date view sits at its resting place; callers keep the last value.
+static CGFloat QCoverSheetContentBottom(UIView *list) {
+    CGFloat bottom = NAN;
+    for (UIView *dateView in qLockClockViews.allObjects) {
+        if (dateView.window != list.window) continue;
+        if (!CGAffineTransformIsIdentity(dateView.transform) || fabs(dateView.frame.origin.y) > 0.5) return NAN;
+        NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:dateView];
+        for (NSUInteger i = 0; i < queue.count && i < 120; i++) {
+            UIView *node = queue[i];
+            if (node.hidden) continue;
+            // Only hidden subtrees are skipped: the widget row sits under a zero-alpha container
+            // (the system renders it through vibrancy), so alpha only rules out the edge view itself.
+            [queue addObjectsFromArray:node.subviews];
+            if (node.alpha < 0.01 || CGRectIsEmpty(node.bounds)) continue;
+            NSString *name = NSStringFromClass(node.class);
+            UIView *edge = nil;
+            if ([name isEqualToString:@"CSProminentEmptyElementView"] ||
+                [name isEqualToString:@"CSProminentSubtitleDateView"]) edge = node;
+            else if ([node isKindOfClass:UILabel.class] &&
+                     ([NSStringFromClass(node.superview.class) isEqualToString:@"CSProminentTimeView"] ||
+                      objc_getAssociatedObject(dateView, QLockClockLabelKey) == node)) edge = node;
+            if (!edge) continue;
+            CGFloat y = CGRectGetMaxY([edge convertRect:edge.bounds toView:list]) - list.bounds.origin.y;
+            if (isfinite(y) && (isnan(bottom) || y > bottom)) bottom = y;
+        }
+    }
+    return bottom;
+}
+
+static UIView *QCoverSheetRootListIn(UIView *root) {
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:root];
+    for (NSUInteger i = 0; i < queue.count && i < 40; i++) {
+        if (QIsCoverSheetRootList(queue[i])) return queue[i];
+        [queue addObjectsFromArray:queue[i].subviews];
+    }
+    return nil;
+}
+
+// The first row sits about 25pt below the inset, so this leaves roughly 18pt under the widgets.
+// Uses the edge measured while the list was at rest: scrolling pushes the widgets up, and an
+// inset that tracked their live position would feed back into the layout and make them jitter.
+static CGFloat QAnchoredTopInset(UIView *list, CGFloat nativeTop) {
+    NSNumber *bottom = objc_getAssociatedObject(list, QListAnchorBottomKey);
+    if (!bottom) return nativeTop;
+    return MAX(0, MIN(nativeTop, bottom.doubleValue - 8));
+}
+
+static BOOL QListAtRest(UIScrollView *scroll) {
+    return scroll && !scroll.tracking && !scroll.dragging && !scroll.decelerating &&
+           fabs(scroll.contentOffset.y + scroll.contentInset.top) < 1;
+}
+
+static UIViewController *QCombinedListController(UIView *list) {
+    for (UIResponder *responder = list.nextResponder; responder; responder = responder.nextResponder)
+        if ([NSStringFromClass(responder.class) isEqualToString:@"CSCombinedListViewController"])
+            return (UIViewController *)responder;
+    return nil;
+}
+
+// Anchored, the header (clock, date, widgets) is pushed from the first point of scroll. 1:1 it would
+// still be half on screen when the list rests at the system's "date hidden" offset, so the push is
+// scaled to finish exactly there: one continuous motion, never a partly hidden resting header.
+static CGPoint QAnchoredDateOffset(UIView *coverSheet, CGPoint offset) {
+    UIView *list = qAnchorRootList;
+    if (offset.y <= 0 || !list || list.window != coverSheet.window || !QListAnchoredToTop(list) ||
+        ![list isKindOfClass:UIScrollView.class]) return offset;
+    NSNumber *bottom = objc_getAssociatedObject(list, QListAnchorBottomKey);
+    UIViewController *controller = QCombinedListController(list);
+    SEL resting = @selector(defaultRestingOffsetExcludingAdjunct);
+    if (!bottom || ![controller respondsToSelector:resting]) return offset;
+    CGFloat hiddenPush = ((CGFloat (*)(id, SEL))objc_msgSend)(controller, resting) +
+                         ((UIScrollView *)list).contentInset.top;
+    if (!isfinite(hiddenPush) || hiddenPush < 1) return offset;
+    offset.y *= MAX(1, (bottom.doubleValue + 12) / hiddenPush);
+    return offset;
+}
+
+static void QRefreshListInsets(UIView *list) {
+    UIViewController *controller = QCombinedListController(list);
+    SEL update = @selector(_updateListViewContentInset);
+    if (![controller respondsToSelector:update]) return;
+    ((void (*)(id, SEL))objc_msgSend)(controller, update);
+    UIScrollView *scroll = [list isKindOfClass:UIScrollView.class] ? (UIScrollView *)list : nil;
+    SEL settle = @selector(settleContentOffset);
+    if (scroll && !scroll.tracking && !scroll.decelerating && [controller respondsToSelector:settle])
+        ((void (*)(id, SEL))objc_msgSend)(controller, settle);
+}
+
+// Coalesced and run after the current layout pass, so it never re-enters the system's own layout.
+static void QScheduleListInsetRefresh(UIView *list) {
+    if (!list || objc_getAssociatedObject(list, QListInsetPendingKey)) return;
+    objc_setAssociatedObject(list, QListInsetPendingKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    __weak UIView *weakList = list;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIView *strongList = weakList;
+        if (!strongList) return;
+        objc_setAssociatedObject(strongList, QListInsetPendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        QRefreshListInsets(strongList);
+    });
+}
+
+// The system lays the cover-sheet list out from the bottom; the toggle starts it below the clock and widgets.
+static void QApplyListAnchor(UIView *list) {
+    if (!list || ![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"] ||
+        ![list respondsToSelector:@selector(setLayoutFromBottom:)]) return;
+    NSNumber *requested = objc_getAssociatedObject(list, QListRequestedFromBottomKey);
+    if (QListAnchoredToTop(list)) {
+        if (list.layoutFromBottom) {
+            [list setLayoutFromBottom:YES];
+            [list setNeedsLayout];
+            // Expanding out of the native stack: the list still rests at the native inset's offset, which
+            // the smaller anchored inset reads as a pull-down (list low, clock pushed down). Re-inset now.
+            QScheduleListInsetRefresh(list);
+        }
+        qAnchorRootList = list;
+        // Re-measure only while nothing is being scrolled (and the date view is in place, see
+        // QCoverSheetContentBottom), at most twice a second; this follows widget changes such as the
+        // small clock or editing the Lock Screen without touching the inset mid-gesture.
+        UIScrollView *scroll = [list isKindOfClass:UIScrollView.class] ? (UIScrollView *)list : nil;
+        NSNumber *last = objc_getAssociatedObject(list, QListInsetRefreshKey);
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (QListAtRest(scroll) && now - last.doubleValue > 0.5) {
+            objc_setAssociatedObject(list, QListInsetRefreshKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            CGFloat bottom = QCoverSheetContentBottom(list);
+            NSNumber *cached = objc_getAssociatedObject(list, QListAnchorBottomKey);
+            if (!isnan(bottom) && (!cached || fabs(cached.doubleValue - bottom) > 1)) {
+                objc_setAssociatedObject(list, QListAnchorBottomKey, @(bottom), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                QRefreshListInsets(list);
+            }
+        }
+    } else if (requested) {
+        // Collapsing into the stack keeps the measured edge, so expanding again lands in place at once.
+        if (!QListAnchorEnabled(list))
+            objc_setAssociatedObject(list, QListAnchorBottomKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(list, QListRequestedFromBottomKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (list.layoutFromBottom != requested.boolValue) {
+            [list setLayoutFromBottom:requested.boolValue];
+            [list setNeedsLayout];
+        }
+        QScheduleListInsetRefresh(list);
+    }
+}
+
 static void QScheduleListScaling(UIView *list) {
     if (!list || objc_getAssociatedObject(list, QScalePendingKey)) return;
     objc_setAssociatedObject(list, QScalePendingKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -1094,59 +1321,255 @@ static void QScheduleListScaling(UIView *list) {
 
 %hook NCNotificationListView
 
+- (void)setLayoutFromBottom:(BOOL)layoutFromBottom {
+    if (!QListAnchoredToTop((UIView *)self)) {
+        %orig;
+        return;
+    }
+    // Keep the system's request so turning the option off restores it exactly.
+    objc_setAssociatedObject(self, QListRequestedFromBottomKey, @(layoutFromBottom), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    %orig(NO);
+}
+
+- (void)didMoveToWindow {
+    %orig;
+    QApplyListAnchor((UIView *)self);
+}
+
 - (void)layoutSubviews {
+    QApplyListAnchor((UIView *)self);
     %orig;
     QRefreshStackStatesIn((UIView *)self);
 }
 
 %end
+
+%hook CSCombinedListViewController
+
+// The native top inset reserves room for the full-size clock; an anchored list starts under the widgets instead.
+- (UIEdgeInsets)_listViewDefaultContentInsets {
+    UIEdgeInsets insets = %orig;
+    // Called on scroll paths too, so it reads the cached root list and measured edge only.
+    UIView *list = qAnchorRootList;
+    if (!list || QCombinedListController(list) != (UIViewController *)self)
+        list = QCoverSheetRootListIn(((UIViewController *)self).viewIfLoaded);
+    if (list && QListAnchoredToTop(list)) insets.top = QAnchoredTopInset(list, insets.top);
+    return insets;
+}
+
+- (void)_setNotificationListHidden:(BOOL)hidden forReason:(id)reason {
+    %orig;
+    for (UIView *list in qActiveLists.allObjects) QApplyListAnchor(list);
+}
+
 %end
+
+%hook NCNotificationStructuredSectionList
+
+// Folding into the stack or expanding out of it switches between native and anchored layout.
+- (void)setSectionListViewGroupedWithContentShown:(BOOL)grouped {
+    %orig;
+    for (UIView *list in qActiveLists.allObjects) QApplyListAnchor(list);
+}
+
+%end
+
+%hook CSCoverSheetView
+
+- (void)setDateViewOffset:(CGPoint)offset scale:(CGFloat)scale {
+    %orig(QAnchoredDateOffset((UIView *)self, offset), scale);
+}
+
+- (void)setDateViewOffset:(CGPoint)offset {
+    %orig(QAnchoredDateOffset((UIView *)self, offset));
+}
+
+%end
+%end
+// iOS 17 renders Now Playing in MediaRemoteUI's activity scene, where QCompactPlayer draws the player.
+// iOS 16 hosts the media controls inside SpringBoard, so the player is overlaid here instead.
+static BOOL QUsesSpringBoardPlayer(void) {
+    static BOOL value;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        value = ![NSProcessInfo.processInfo isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){17, 0, 0}];
+    });
+    return value;
+}
+
 // Remote Now Playing and Live Activities share the same view containers.
-static BOOL QIsNowPlayingPlatter(UIView *platter) {
-    UIView *content = QFind(platter, @"CSActivityItemContentView");
-    if (!content) return NO;
+// 1 = Now Playing, 0 = another activity, -1 = host or descriptor not attached yet.
+static NSInteger QNowPlayingPlatterState(UIView *platter) {
     BOOL hasLocalMedia = QFind(platter, @"MRUNowPlayingLabelView") ||
                          QFind(platter, @"MRUNowPlayingTimeControlsView");
+    // On iOS 16 the local media views are the only reliable signal (no activity descriptor chain).
+    if (QUsesSpringBoardPlayer()) return hasLocalMedia ? 1 : 0;
+    UIView *content = QFind(platter, @"CSActivityItemContentView");
+    if (!content) return -1;
     id identity = content.nextResponder;
     SEL selectors[] = { @selector(activityHostViewController), @selector(activitySceneDescriptor),
                         @selector(activityDescriptor), @selector(platterTargetBundleIdentifier) };
     for (SEL selector : selectors) {
+        if (!identity) return hasLocalMedia ? 1 : -1;
         // Older local MRU hosts do not expose the ActivityUI descriptor chain.
-        if (![identity respondsToSelector:selector]) return hasLocalMedia;
+        if (![identity respondsToSelector:selector]) return hasLocalMedia ? 1 : 0;
         identity = ((id (*)(id, SEL))objc_msgSend)(identity, selector);
     }
+    if (!identity) return -1;
     return [identity isKindOfClass:NSString.class] &&
-           [identity isEqualToString:@"com.apple.MediaRemoteUI"];
+           [identity isEqualToString:@"com.apple.MediaRemoteUI"] ? 1 : 0;
 }
 
 static void *QPlayerChromeAlphaKey = &QPlayerChromeAlphaKey;
+static void *QPlayerChromeVisibilityKey = &QPlayerChromeVisibilityKey;
+static void *QPlatterChromeHiddenKey = &QPlatterChromeHiddenKey;
+static void *QPlatterRetryKey = &QPlatterRetryKey;
+
+static BOOL QIsPlatterMaterial(UIView *view) {
+    return [NSStringFromClass(view.class) isEqualToString:@"MTMaterialView"];
+}
+
+// Requested alpha and hidden state are kept on the material so SpringBoard's own writes survive
+// suppression. Always-On Display changes the material's layer opacity directly, so alpha alone is not enough.
+static BOOL QMaterialSuppressed(UIView *material) {
+    UIView *platter = material.superview;
+    return platter && [objc_getAssociatedObject(platter, QPlatterChromeHiddenKey) boolValue];
+}
+
+static void *QSpringBoardPlayerKey = &QSpringBoardPlayerKey;
+
+// iOS 16: the player sits beside the native platter in its container. The platter is hidden through
+// its layer's opacity so UIView alpha stays 1 and touches still reach the native controls.
+static void QLayoutSpringBoardPlayer(UIView *platter, BOOL show) {
+    QPlayerView *player = objc_getAssociatedObject(platter, QSpringBoardPlayerKey);
+    UIView *container = platter.superview;
+    if (!show || !container) {
+        if (!player) return;
+        [player removeFromSuperview];
+        objc_setAssociatedObject(platter, QSpringBoardPlayerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        platter.layer.opacity = 1;
+        return;
+    }
+    if (!player) {
+        player = [[QPlayerView alloc] initWithFrame:CGRectZero];
+        [player setSuppressSiblingViews:NO];
+        [player setUsesNativeMetadataFallback:NO];
+        objc_setAssociatedObject(platter, QSpringBoardPlayerKey, player, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (player.superview != container) [container addSubview:player];
+    // Stay inside the cell; the cell's own transform scales the player with the list.
+    UIView *cell = platter;
+    while (cell && ![NSStringFromClass(cell.class) isEqualToString:@"NCNotificationListCell"]) cell = cell.superview;
+    CGRect safeRect = cell ? [cell convertRect:cell.bounds toView:container] : container.bounds;
+    CGSize size = platter.bounds.size;
+    CGFloat height = MIN(88, MAX(50, safeRect.size.height - 8));
+    CGRect frame = [platter convertRect:CGRectMake(0, (size.height - height) * 0.5, size.width, height)
+                                 toView:container];
+    if (!CGRectIsEmpty(safeRect)) {
+        frame.origin.y = MIN(frame.origin.y, CGRectGetMaxY(safeRect) - frame.size.height - 4);
+        frame.origin.y = MAX(frame.origin.y, CGRectGetMinY(safeRect) + 4);
+    }
+    CGFloat scale = UIScreen.mainScreen.scale;
+    player.frame = CGRectMake(round(frame.origin.x * scale) / scale, round(frame.origin.y * scale) / scale,
+                              round(frame.size.width * scale) / scale, round(frame.size.height * scale) / scale);
+    [player applySettings:qSettings];
+    [player seedFromNativePlayer:platter];
+    [container bringSubviewToFront:player];
+    player.hidden = NO;
+    platter.alpha = 1;
+    platter.layer.opacity = 0;
+}
+
+static void QApplyPlatterChrome(UIView *platter, NSUInteger attempt) {
+    if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"]) return;
+    BOOL candidate = QHasAncestor(platter, @"NCNotificationListCell") &&
+                     QHasAncestor(platter, @"NCNotificationListSupplementaryHostingView");
+    NSInteger state = candidate ? QNowPlayingPlatterState(platter) : 0;
+    BOOL enabled = [qSettings[@"masterEnabled"] boolValue] && [qSettings[@"playerEnabled"] boolValue];
+    BOOL mediaPlatter = state == 1;
+    if (mediaPlatter) [qActivePlatters addObject:platter];
+    BOOL wasHidden = [objc_getAssociatedObject(platter, QPlatterChromeHiddenKey) boolValue];
+    // A verified media platter keeps its state while the remote host is briefly detached.
+    BOOL hideChrome = enabled && (mediaPlatter || (state < 0 && wasHidden && platter.window));
+    if (QUsesSpringBoardPlayer()) {
+        // The whole platter is hidden instead; the material guard must stay off so nothing is left at alpha 0.
+        QLayoutSpringBoardPlayer(platter, hideChrome);
+        return;
+    }
+    objc_setAssociatedObject(platter, QPlatterChromeHiddenKey, hideChrome ? @YES : nil,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    for (UIView *view in platter.subviews) {
+        if (!QIsPlatterMaterial(view)) continue;
+        NSNumber *original = objc_getAssociatedObject(view, QPlayerChromeAlphaKey);
+        NSNumber *originalHidden = objc_getAssociatedObject(view, QPlayerChromeVisibilityKey);
+        if (hideChrome) {
+            [view setAlpha:original ? original.doubleValue : view.alpha];
+            [view setHidden:originalHidden ? originalHidden.boolValue : view.hidden];
+        } else {
+            if (original) {
+                objc_setAssociatedObject(view, QPlayerChromeAlphaKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                view.alpha = original.doubleValue;
+            }
+            if (originalHidden) {
+                objc_setAssociatedObject(view, QPlayerChromeVisibilityKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                view.hidden = originalHidden.boolValue;
+            }
+        }
+    }
+    // The activity descriptor chain is filled in after the first layout; re-check without waiting for one.
+    if (state < 0 && platter.window && attempt < 8) {
+        NSObject *token = [NSObject new];
+        objc_setAssociatedObject(platter, QPlatterRetryKey, token, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        __weak UIView *weakPlatter = platter;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * (attempt + 1) * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            UIView *strongPlatter = weakPlatter;
+            if (!strongPlatter || objc_getAssociatedObject(strongPlatter, QPlatterRetryKey) != token) return;
+            QApplyPlatterChrome(strongPlatter, attempt + 1);
+        });
+    } else {
+        objc_setAssociatedObject(platter, QPlatterRetryKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
 
 %group QHostPlatter
 %hook PLPlatterView
 
 - (void)layoutSubviews {
     %orig;
-    if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"]) return;
-    BOOL mediaPlatter = QHasAncestor(self, @"NCNotificationListCell") &&
-                        QHasAncestor(self, @"NCNotificationListSupplementaryHostingView") &&
-                        QIsNowPlayingPlatter(self);
-    BOOL hideChrome = mediaPlatter && [qSettings[@"masterEnabled"] boolValue] &&
-                      [qSettings[@"playerEnabled"] boolValue];
-    if (mediaPlatter) [qActivePlatters addObject:self];
-    // The remote content stays visible; only SpringBoard's native platter material is suppressed.
-    for (UIView *view in self.subviews) {
-        if (![NSStringFromClass(view.class) isEqualToString:@"MTMaterialView"]) continue;
-        NSNumber *original = objc_getAssociatedObject(view, QPlayerChromeAlphaKey);
-        if (hideChrome) {
-            if (!original) objc_setAssociatedObject(view, QPlayerChromeAlphaKey,
-                @(view.alpha), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            view.alpha = 0;
-        } else if (original) {
-            view.alpha = original.doubleValue;
-            objc_setAssociatedObject(view, QPlayerChromeAlphaKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-    }
+    QApplyPlatterChrome(self, 0);
+}
 
+- (void)didMoveToWindow {
+    %orig;
+    QApplyPlatterChrome(self, 0);
+}
+
+- (void)didAddSubview:(UIView *)subview {
+    %orig;
+    if (QIsPlatterMaterial(subview)) QApplyPlatterChrome(self, 0);
+}
+
+%end
+
+%hook MTMaterialView
+
+- (void)setAlpha:(CGFloat)alpha {
+    if (!QMaterialSuppressed(self)) {
+        %orig;
+        return;
+    }
+    objc_setAssociatedObject(self, QPlayerChromeAlphaKey, @(alpha), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    %orig(0);
+}
+
+- (void)setHidden:(BOOL)hidden {
+    if (!QMaterialSuppressed(self)) {
+        %orig;
+        return;
+    }
+    objc_setAssociatedObject(self, QPlayerChromeVisibilityKey, @(hidden), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    %orig(YES);
 }
 
 %end
@@ -1224,6 +1647,24 @@ static void QPositionLowerWidgets(UIView *widget, BOOL enabled) {
     if (!CGRectEqualToRect(widget.frame, target)) widget.frame = target;
 }
 
+// Lock-clock layout runs on every pass; formatters are rebuilt only when the locale changes.
+static NSDateFormatter *QLockClockFormatter(NSString *pattern) {
+    static NSMutableDictionary<NSString *, NSDateFormatter *> *formatters;
+    static NSString *localeID;
+    NSString *current = NSLocale.currentLocale.localeIdentifier;
+    if (!formatters || ![localeID isEqualToString:current]) {
+        formatters = [NSMutableDictionary dictionary];
+        localeID = [current copy];
+    }
+    NSDateFormatter *formatter = formatters[pattern];
+    if (!formatter) {
+        formatter = [NSDateFormatter new];
+        [formatter setLocalizedDateFormatFromTemplate:pattern];
+        formatters[pattern] = formatter;
+    }
+    return formatter;
+}
+
 // The native clock remains in the hierarchy for layout and taps. The date
 // comes from the user's existing top widget, so its format stays untouched.
 static void QStyleLockClock(UIView *dateView) {
@@ -1243,9 +1684,12 @@ static void QStyleLockClock(UIView *dateView) {
                 for (UIView *child in node.subviews)
                     if ([child isKindOfClass:UILabel.class]) { nativeText = child; break; }
             }
-            if ([name isEqualToString:@"CSProminentEmptyElementView"] && !node.hidden && node.alpha > 0.01) {
+            if ([name isEqualToString:@"CSProminentEmptyElementView"] && !node.hidden) {
                 CGRect visibleFrame = [node convertRect:node.bounds toView:dateView];
-                if (node.bounds.size.height <= 50 && CGRectIntersectsRect(visibleFrame, dateView.bounds)) topWidget = node;
+                if (node.alpha > 0.01 && node.bounds.size.height <= 50 &&
+                    CGRectIntersectsRect(visibleFrame, dateView.bounds)) topWidget = node;
+                // The row fades out while scrolling pushes the date away, and the system re-lays it out
+                // at its native position meanwhile; it must still be moved up, or it returns 90pt too low.
                 else if (node.bounds.size.height >= 60) bottomWidgets = node;
             }
             if ([name isEqualToString:@"CSProminentSubtitleDateView"] && !node.hidden) {
@@ -1297,9 +1741,7 @@ static void QStyleLockClock(UIView *dateView) {
         nativeText.hidden = YES;
         CGFloat fontSize = [qSettings[@"smallLockClockFontSize"] doubleValue];
         fontSize = isfinite(fontSize) ? MAX(18, MIN(30, fontSize)) : 23;
-        NSDateFormatter *time = [NSDateFormatter new];
-        [time setLocalizedDateFormatFromTemplate:@"jm"];
-        NSString *clock = [time stringFromDate:NSDate.date];
+        NSString *clock = [QLockClockFormatter(@"jm") stringFromDate:NSDate.date];
         CGFloat clockWidth = ceil([clock sizeWithAttributes:@{NSFontAttributeName: [UIFont systemFontOfSize:fontSize weight:UIFontWeightBold]}].width) + 4;
         CGFloat widgetWidth = MIN(300, MAX(180, dateView.bounds.size.width - 30 - clockWidth - 12));
         CGFloat rowLeft = (dateView.bounds.size.width - clockWidth - 12 - widgetWidth) / 2;
@@ -1340,9 +1782,7 @@ static void QStyleLockClock(UIView *dateView) {
             }
             BOOL temporaryText = normalDate.length && date.length && ![date isEqualToString:normalDate];
             if (!date.length) {
-                NSDateFormatter *format = [NSDateFormatter new];
-                [format setLocalizedDateFormatFromTemplate:@"MMMdEEEE"];
-                date = [format stringFromDate:NSDate.date];
+                date = [QLockClockFormatter(@"MMMdEEEE") stringFromDate:NSDate.date];
             }
             // 临时提示期间日期副本会透明，必须同时显示原生文字。
             subtitleText.hidden = !temporaryText;
@@ -1382,8 +1822,23 @@ static void QRestyleLockClockForWidget(UIView *widget) {
 %hook CSProminentEmptyElementView
 - (void)setFrame:(CGRect)frame {
     %orig;
-    if (self.window && frame.size.height >= 60 && !qStylingLockClock)
+    if (!self.window || frame.size.height < 60) return;
+    if (!qStylingLockClock) {
         QRestyleLockClockForWidget(self);
+        return;
+    }
+    // A native relayout during our own pass would otherwise leave the row at its native position.
+    // One coalesced, rate-limited retry: if the system keeps resetting the frame, this must never
+    // turn into a main-thread loop.
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (qLockClockRetryPending || now - qLockClockRetryAt < 0.3) return;
+    qLockClockRetryPending = YES;
+    __weak UIView *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        qLockClockRetryPending = NO;
+        qLockClockRetryAt = CFAbsoluteTimeGetCurrent();
+        QRestyleLockClockForWidget(weakSelf);
+    });
 }
 - (void)didMoveToWindow {
     %orig;
@@ -1457,9 +1912,15 @@ static void QRestyleLockClockForWidget(UIView *widget) {
         if (objc_getClass("SBSearchPresenter")) %init(QSearchGesture);
         if (objc_getClass("SBFLockScreenDateView")) {
             %init(QSmallLockClock);
-            [NSTimer scheduledTimerWithTimeInterval:20 repeats:YES block:^(__unused NSTimer *timer) {
-                for (UIView *dateView in qLockClockViews.allObjects) QStyleLockClock(dateView);
-            }];
+            // Fire just after each minute boundary so the small clock never lags the system clock.
+            NSTimeInterval now = NSDate.date.timeIntervalSinceReferenceDate;
+            NSDate *nextMinute = [NSDate dateWithTimeIntervalSinceReferenceDate:floor(now / 60) * 60 + 60.05];
+            NSTimer *clockTimer = [[NSTimer alloc] initWithFireDate:nextMinute interval:60 repeats:YES
+                block:^(__unused NSTimer *timer) {
+                    for (UIView *dateView in qLockClockViews.allObjects) QStyleLockClock(dateView);
+                }];
+            clockTimer.tolerance = 0.2;
+            [NSRunLoop.mainRunLoop addTimer:clockTimer forMode:NSRunLoopCommonModes];
         }
     }
 }

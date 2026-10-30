@@ -20,7 +20,15 @@ ctor = springboard.split("%ctor {", 1)[1]
 media_branch = ctor.split("return;", 1)[0]
 assert "com.apple.MediaRemoteUI" in media_branch
 assert "QInstallNativeArtworkHooks();" in media_branch and "QInstallCompactPlayerHooks();" in media_branch
-assert "[[QPlayerView alloc]" not in springboard
+# SpringBoard draws a player only on iOS 16, from the single gated layout function.
+assert springboard.count("[[QPlayerView alloc]") == 1
+sb_layout = springboard.split("static void QLayoutSpringBoardPlayer(", 1)[1].split("static void QApplyPlatterChrome(", 1)[0]
+assert "[[QPlayerView alloc]" in sb_layout
+assert springboard.count("QLayoutSpringBoardPlayer(platter, hideChrome)") == 1
+chrome = springboard.split("static void QApplyPlatterChrome(", 1)[1].split("%group QHostPlatter", 1)[0]
+assert "if (QUsesSpringBoardPlayer()) {\n        // The whole platter is hidden instead" in chrome
+gate = springboard.split("static BOOL QUsesSpringBoardPlayer(void) {", 1)[1].split("}\n", 2)[0]
+assert "isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){17, 0, 0}" in springboard
 
 role = re.search(r'BOOL listScene = .*isEqualToString:@"([^"]+)"\];', compact)[1]
 assert role == roles["ActivityUIServices.ActivityListItemSceneSpecification"]["role"]

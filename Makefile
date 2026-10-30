@@ -1,4 +1,4 @@
-export TARGET := iphone:clang:16.5:17.0
+export TARGET := iphone:clang:16.5:16.0
 export ARCHS := arm64 arm64e
 export THEOS_PACKAGE_SCHEME := roothide
 export DEB_ARCH := iphoneos-arm64e

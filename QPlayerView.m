@@ -35,7 +35,7 @@ NSDictionary *QReadPlayerSettings(void) {
                     @"smallLockClockFontSize": @23,
                     @"playerEnabled": @YES, @"disableListScaling": @NO,
                      @"scaleBanners": @NO,
-                    @"showNotificationCount": @YES,
+                    @"showNotificationCount": @YES, @"notificationsFromTop": @NO,
                     @"largeArtworkOffsetY": @0,
                     @"clearAllEnabled": @YES, @"clearHapticEnabled": @YES,
                     @"showProgress": @YES, @"backgroundProgress": @YES, @"hideRoute": @YES,

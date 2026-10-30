@@ -96,6 +96,28 @@
 			<key>set</key>
 			<string>setPreferenceValue:specifier:</string>
 		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>开启后，展开的通知列表和音乐播放器从时间与小组件下方开始排列，可上下滑动浏览；通知叠放时仍在屏幕底部，再下滑按系统方式收起。锁屏和通知中心都生效。</string>
+			<key>label</key>
+			<string>位置</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>key</key>
+			<string>notificationsFromTop</string>
+			<key>label</key>
+			<string>通知从顶部开始</string>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+		</dict>
 	</array>
 </dict>
 </plist>

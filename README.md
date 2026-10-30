@@ -38,6 +38,8 @@ Quart17 brings a brand-new lock screen music player and notification experience 
 - Notification layout (QNotifications): cleaner notification list arrangement
 - 下拉清理手势（QMasterGesture）：下拉手势快速清理通知
 - Pull-to-clear gesture (QMasterGesture): quickly clear notifications with a pull gesture
+- 通知从顶部开始：展开的通知列表与音乐播放器从时间和小组件下方开始排列，可上下滑动；叠放时保持系统的底部位置，下滑按系统方式收起
+- Start notifications at top: the expanded list and the music player start right below the clock and widgets and scroll from there; a folded stack keeps the native bottom position and swiping down hides it as usual
 
 ### 手势 / Gestures
 - 锁屏下拉清理通知
@@ -45,8 +47,8 @@ Quart17 brings a brand-new lock screen music player and notification experience 
 
 ## 安装要求 / Requirements
 
-- 当前 2.8 构建最低系统为 iOS 17；旧版 iOS 16 兼容记录不代表本版支持。
-- Version 2.8 requires iOS 17. Historical iOS 16 compatibility does not apply to this release.
+- iOS 16 – iOS 17（iOS 17 经真机测试；iOS 16 已构建验包，尚未真机测试）
+- iOS 16 – iOS 17 (iOS 17 device-tested; iOS 16 built and inspected, not yet device-tested)
 - 越狱环境：Dopamine 2.x / RootHide（主要测试环境为 Relaxin 越狱 + RootHide）
 - Jailbreak: Dopamine 2.x / RootHide (primarily tested on Relaxin jailbreak + RootHide)
 - 架构：arm64 / arm64e
@@ -88,9 +90,21 @@ After installation, find Quart17 in Settings to configure:
 
 ## 版本历史 / Changelog
 
-### 2.8 · 2026-10-28
-- 调整锁屏紧凑播放器居中布局，并放宽媒体宿主背景的尺寸限制。此版本尚待真机验证。
-- Center the compact lock-screen player and remove fixed-size limits from media host background detection. Device validation is pending.
+### 2.8 · 2026-10-30
+- 新增「通知从顶部开始」（通知排版与缩放 → 位置）：展开的列表从时间和小组件下方开始；上滑时时间与小组件随列表平滑推走，松手只停在完整显示或完全隐藏两种状态；叠放与下滑收起保持系统原生逻辑
+- New "Start notifications at top" (Notification layout & size → Position): the expanded list starts below the clock and widgets; scrolling pushes the clock and widgets away smoothly and releases settle fully shown or fully hidden; the folded stack and swipe-to-hide stay native
+- 恢复 iOS 16 支持：iOS 16 上播放器由 SpringBoard 绘制在原生媒体控件之上（iOS 17 仍在 MediaRemoteUI 中绘制）；安装包最低系统改为 iOS 16.0
+- Restore iOS 16 support: on iOS 16 the player is drawn by SpringBoard over the native media controls (iOS 17 still renders in MediaRemoteUI); packages now require iOS 16.0
+- 锁屏紧凑播放器居中布局；媒体宿主背景识别不再限制尺寸
+- Center the compact lock-screen player; media host background detection no longer depends on fixed sizes
+- 修复原生播放器背景偶尔透出，以及全天候显示屏下仍显示原生背景
+- Fix the native player background occasionally showing through, including on the Always-On Display
+- 修复小时间在锁屏滚动后小组件回到偏低 90pt 的位置；小时间按整分钟更新
+- Fix the small clock leaving the widget row 90pt too low after scrolling; the small clock now updates on the minute
+- 修复播放器设置跨进程同步的时序问题，以及通知计数徽标偶尔不更新
+- Fix a settings sync race between processes and a notification count badge that could stay stale
+- 验证：iOS 17 RootHide 经用户真机测试确认；rootless 与 iOS 16 已构建验包，尚未真机测试
+- Validation: iOS 17 RootHide confirmed on device by the user; rootless and iOS 16 built and inspected, not yet device-tested
 
 ### 2.7.112 · 2026-10-26
 - 紧凑播放器移至 MediaRemoteUI 的通知列表场景，按媒体身份识别宿主，避免覆盖普通实时活动。

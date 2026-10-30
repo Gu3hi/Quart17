@@ -606,6 +606,10 @@ void QInstallNativeArtworkHooks(void) {
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
         QNativeArtworkChanged, CFSTR("com.gushi.quart17/preferenceschanged"), NULL,
         CFNotificationSuspensionBehaviorDeliverImmediately);
+    // SpringBoard posts this after the shared flag and corner states are current.
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+        QNativeArtworkChanged, CFSTR("com.gushi.quart17/playercornerchanged"), NULL,
+        CFNotificationSuspensionBehaviorDeliverImmediately);
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
         QToggleNativeArtwork, CFSTR("com.gushi.quart17/togglenativeartwork"), NULL,
         CFNotificationSuspensionBehaviorDeliverImmediately);
